@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+google-genai
+redis
+alembic
+sqlalchemy
+psycopg2-binary
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+sqlalchemy[asyncio] 
+asyncpg
+pydantic-settings
+pydantic[email]
+httpx
+structlog
