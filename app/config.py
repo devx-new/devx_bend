@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     cloudinary_cloud_name: str = os.getenv("cloudinary_cloud_name")
     cloudinary_api_key: str = os.getenv("cloudinary_api_key")
     cloudinary_api_secret: str = os.getenv("cloudinary_api_secret")
-    gemini_api_key: str = os.getenv("gemini_api_key")
+    gemini_api_key: str = os.getenv("gemini_api_key", "")
+    nvidia_api_key: str = os.getenv("NVIDIA_API_KEY", "")
+    # "nvidia" uses Llama-3.3-70B via NVIDIA NIM (free tier)
+    # "gemini" uses Gemini 2.5 Flash
+    digest_provider: str = os.getenv("DIGEST_PROVIDER", "nvidia")
+    huggingface_api_key: str = os.getenv("huggingface_api_key", "")
     github_client_id: str = os.getenv("github_client_id")
     github_client_secret: str = os.getenv("github_client_secret")
     github_redirect_uri: str = os.getenv("github_redirect_uri")

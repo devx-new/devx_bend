@@ -6,6 +6,7 @@ from app.models.routing import RoutingRule
 from app.models.notification import NotificationsLog
 from app.models.survey import DevexSurvey
 from app.models.audit import AuditLog
+from app.models.digest import WeeklyDigest
 
 __all__ = [
     "Tenant",
@@ -18,4 +19,5 @@ __all__ = [
     "NotificationsLog",
     "DevexSurvey",
     "AuditLog",
+    "WeeklyDigest",
 ]

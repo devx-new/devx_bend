@@ -2,24 +2,25 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 import httpx
 from jose import ExpiredSignatureError, JWTError, jwt
 from jose.exceptions import JWTClaimsError
-from passlib.context import CryptContext
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-pwd_context = CryptContext(schemes=["bcrypt"], bcrypt__rounds=settings.bcrypt_cost)
+_BCRYPT_ROUNDS = settings.bcrypt_cost
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS))
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
@@ -54,12 +55,12 @@ def decode_token(token: str) -> dict:
 
 def generate_api_key() -> tuple[str, str]:
     raw = str(uuid.uuid4())
-    hashed = pwd_context.hash(raw)
+    hashed = bcrypt.hashpw(raw.encode("utf-8"), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS)).decode("utf-8")
     return raw, hashed
 
 
 def verify_api_key(raw: str, hashed: str) -> bool:
-    return pwd_context.verify(raw, hashed)
+    return bcrypt.checkpw(raw.encode("utf-8"), hashed.encode("utf-8"))
 
 
 def get_github_oauth_url() -> str:

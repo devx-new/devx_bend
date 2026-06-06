@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.feedback import FeedbackItem
 from app.models.integration import Integration
+from app.worker.orchestrator import start_feedback_pipeline
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -78,6 +79,8 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         )
         db.add(item)
         await db.commit()
+        await db.refresh(item)
+        start_feedback_pipeline.delay(item.id, integration.tenant_id)
 
     return {"success": True, "message": {"received": True}}
 
@@ -106,6 +109,8 @@ async def gitlab_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         )
         db.add(item)
         await db.commit()
+        await db.refresh(item)
+        start_feedback_pipeline.delay(item.id, integration.tenant_id)
 
     return {"success": True, "message": {"received": True}}
 
@@ -136,5 +141,7 @@ async def jira_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         )
         db.add(item)
         await db.commit()
+        await db.refresh(item)
+        start_feedback_pipeline.delay(item.id, integration.tenant_id)
 
     return {"success": True, "message": {"received": True}}

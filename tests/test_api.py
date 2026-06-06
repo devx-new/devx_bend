@@ -24,4 +24,4 @@ async def test_feedback_requires_auth():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/v1/feedback")
-    assert resp.status_code == 400
+    assert resp.status_code == 401

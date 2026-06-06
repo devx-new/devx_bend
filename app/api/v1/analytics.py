@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -6,15 +7,77 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.cookies import ACCESS_TOKEN_COOKIE
+from app.core.rate_limit import get_redis
 from app.database import get_db
 from app.models.feedback import FeedbackItem
 from app.models.survey import DevexSurvey
+from app.models.digest import WeeklyDigest
 from app.models.user import User
 from app.schemas.analytics import AnalyticsSummaryResponse
 from app.schemas.survey import SurveyCreate, SurveyResponse
 from app.security import decode_token
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+ANALYTICS_CACHE_TTL = 300  # 5 minutes
+
+
+@router.get("/kpis")
+async def analytics_kpis(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Key performance indicators - cached in Redis for 5 minutes."""
+    tenant_id = current_user.tenant_id
+    cache_key = f"analytics:kpis:{tenant_id}"
+
+    try:
+        r = await get_redis()
+        cached = await r.get(cache_key)
+        if cached:
+            return {"success": True, "data": json.loads(cached), "meta": {"cached": True}}
+    except Exception:
+        pass  # Redis unavailable — fall through to DB
+
+    total = await db.scalar(
+        select(func.count()).select_from(FeedbackItem).where(FeedbackItem.tenant_id == tenant_id)
+    )
+    open_count = await db.scalar(
+        select(func.count()).select_from(FeedbackItem)
+        .where(FeedbackItem.tenant_id == tenant_id, FeedbackItem.status == "open")
+    )
+    critical_count = await db.scalar(
+        select(func.count()).select_from(FeedbackItem)
+        .where(FeedbackItem.tenant_id == tenant_id, FeedbackItem.priority_score > 80)
+    )
+    avg_sentiment = await db.scalar(
+        select(func.avg(FeedbackItem.sentiment_score))
+        .where(FeedbackItem.tenant_id == tenant_id, FeedbackItem.sentiment_score.isnot(None))
+    )
+
+    cat_result = await db.execute(
+        select(FeedbackItem.category, func.count().label("count"))
+        .where(FeedbackItem.tenant_id == tenant_id, FeedbackItem.category.isnot(None))
+        .group_by(FeedbackItem.category)
+        .order_by(func.count().desc())
+    )
+    categories = {row.category: row.count for row in cat_result}
+
+    data = {
+        "total_items": total or 0,
+        "open_count": open_count or 0,
+        "critical_count": critical_count or 0,
+        "avg_sentiment": round(float(avg_sentiment), 3) if avg_sentiment else None,
+        "top_categories": categories,
+    }
+
+    try:
+        r = await get_redis()
+        await r.setex(cache_key, ANALYTICS_CACHE_TTL, json.dumps(data))
+    except Exception:
+        pass
+
+    return {"success": True, "data": data, "meta": {"cached": False}}
 
 
 @router.get("/summary")
@@ -61,11 +124,23 @@ async def analytics_trends(
     days: int = Query(30, ge=1, le=365),
 ):
     tenant_id = current_user.tenant_id
+    cache_key = f"analytics:trends:{tenant_id}:{days}"
+
+    try:
+        r = await get_redis()
+        cached = await r.get(cache_key)
+        if cached:
+            return {"success": True, "data": json.loads(cached), "meta": {"cached": True}}
+    except Exception:
+        pass
+
     since = datetime.now(timezone.utc) - timedelta(days=days)
     result = await db.execute(
         select(
             func.date(FeedbackItem.created_at).label("date"),
             func.count().label("count"),
+            func.avg(FeedbackItem.priority_score).label("avg_priority"),
+            func.avg(FeedbackItem.sentiment_score).label("avg_sentiment"),
             FeedbackItem.category
         )
         .where(
@@ -75,16 +150,25 @@ async def analytics_trends(
         .group_by(FeedbackItem.category, func.date(FeedbackItem.created_at))
         .order_by(func.date(FeedbackItem.created_at))
     )
-    daily = [{"date": str(row.date), "count": row.count, "category": row.category or "No category"} for row in result]
+    daily = [
+        {
+            "date": str(row.date),
+            "count": row.count,
+            "category": row.category or "uncategorized",
+            "avg_priority": round(float(row.avg_priority), 1) if row.avg_priority else None,
+            "avg_sentiment": round(float(row.avg_sentiment), 3) if row.avg_sentiment else None,
+        }
+        for row in result
+    ]
 
-    return {
-        "success": True,
-        "message": {
-            "daily": daily,
-            "weekly": [],
-            "period_days": days,
-        },
-    }
+    data = {"daily": daily, "period_days": days}
+    try:
+        r = await get_redis()
+        await r.setex(cache_key, ANALYTICS_CACHE_TTL, json.dumps(data))
+    except Exception:
+        pass
+
+    return {"success": True, "data": data, "meta": {"cached": False}}
 
 
 @router.get("/devex-scores")
@@ -150,6 +234,45 @@ async def submit_survey(
 # Browsers automatically include cookies on same-origin WebSocket upgrade requests.
 # No token query param needed — the access_token HttpOnly cookie is sent automatically.
 # CSRF validation is skipped for WebSocket (browsers cannot set custom headers on WS upgrades).
+
+
+@router.get("/digests")
+async def list_digests(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    page: int = 1,
+    per_page: int = 10,
+):
+    """Paginated list of weekly digest reports for the tenant."""
+    from sqlalchemy import desc as sa_desc
+    tenant_id = current_user.tenant_id
+    total = await db.scalar(
+        select(func.count()).select_from(WeeklyDigest).where(WeeklyDigest.tenant_id == tenant_id)
+    )
+    result = await db.execute(
+        select(WeeklyDigest)
+        .where(WeeklyDigest.tenant_id == tenant_id)
+        .order_by(sa_desc(WeeklyDigest.created_at))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    digests = result.scalars().all()
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": d.id,
+                "report_markdown": d.report_markdown,
+                "period_start": d.period_start.isoformat(),
+                "period_end": d.period_end.isoformat(),
+                "created_at": d.created_at.isoformat(),
+            }
+            for d in digests
+        ],
+        "meta": {"page": page, "per_page": per_page, "total": total or 0},
+    }
+
+
 @router.websocket("/ws/feed")
 async def ws_feed(websocket: WebSocket):
     token = websocket.cookies.get(ACCESS_TOKEN_COOKIE)

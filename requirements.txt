@@ -6,7 +6,7 @@ alembic
 sqlalchemy
 psycopg2-binary
 python-jose[cryptography]
-passlib[bcrypt]
+bcrypt
 python-multipart
 sqlalchemy[asyncio] 
 asyncpg
@@ -14,3 +14,12 @@ pydantic-settings
 pydantic[email]
 httpx
 structlog
+celery
+aiosqlite
+vaderSentiment
+pgvector
+openai # for the llama model from nvidia
+# --- test dependencies ---
+pytest
+pytest-asyncio
+httpx

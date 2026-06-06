@@ -54,7 +54,7 @@ async def check_rate_limit(
         await r.expire(key, window_seconds)
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Rate limiter unavailable, failing open", error=str(exc))
+        logger.warning("Rate limiter unavailable, failing open: %s", exc)
         return True
 
 

@@ -58,6 +58,10 @@ async def create_feedback(
     await write_audit_log(db, tenant_id, current_user.id, "CREATE", "feedback_item", item.id)
     await db.commit()
     await db.refresh(item)
+    
+    from app.worker.orchestrator import start_feedback_pipeline
+    start_feedback_pipeline.delay(item.id, tenant_id)
+    
     return item
 
 
