@@ -76,4 +76,9 @@ def clear_auth_cookies(response: Response) -> None:
         (REFRESH_TOKEN_COOKIE, _REFRESH_PATH),
         (CSRF_TOKEN_COOKIE, "/"),
     ):
-        response.delete_cookie(name, path=path)
+        response.delete_cookie(
+            name,
+            path=path,
+            secure=settings.cookie_secure,
+            samesite=settings.cookie_samesite,
+        )

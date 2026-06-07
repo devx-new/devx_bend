@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
         allow_origins=settings.allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Tenant-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "X-CSRF-Token"],
     )
     app.add_middleware(TenantMiddleware)
 

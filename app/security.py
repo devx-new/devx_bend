@@ -46,10 +46,10 @@ def decode_token(token: str) -> dict:
         logger.debug("JWT decode failed: token expired")
         return {}
     except JWTClaimsError as exc:
-        logger.debug("JWT decode failed: invalid claims", error=str(exc))
+        logger.debug("JWT decode failed: invalid claims", extra={"error": str(exc)})
         return {}
     except JWTError as exc:
-        logger.debug("JWT decode failed: malformed token", error=str(exc))
+        logger.debug("JWT decode failed: malformed token", extra={"error": str(exc)})
         return {}
 
 

@@ -1,4 +1,6 @@
 import logging
+import re
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -38,7 +40,6 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
     # 2. Slug generation
-    import re, uuid
     base_slug = re.sub(r'[^a-z0-9]+', '-', body.organization_name.lower()).strip('-')
     if not base_slug:
         base_slug = "tenant"
@@ -149,10 +150,9 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
     # Check Redis blocklist for revoked tokens
-    if jti:
-        r = await get_redis()
-        if await r.get(f"revoked_jti:{jti}"):
-            raise HTTPException(status_code=401, detail="Refresh token has been revoked")
+    r = await get_redis() if jti else None
+    if jti and await r.get(f"revoked_jti:{jti}"):
+        raise HTTPException(status_code=401, detail="Refresh token has been revoked")
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -160,8 +160,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         raise HTTPException(status_code=401, detail="User not found")
 
     # Revoke the consumed refresh token (rotation)
-    if jti:
-        r = await get_redis()
+    if jti and r:
         ttl = int(payload.get("exp", 0)) - int(datetime.now(timezone.utc).timestamp())
         if ttl > 0:
             await r.setex(f"revoked_jti:{jti}", ttl, "1")
@@ -244,4 +243,4 @@ async def github_oauth_callback(
 
     set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id})

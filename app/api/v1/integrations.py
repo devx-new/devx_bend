@@ -1,17 +1,515 @@
+import secrets
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.config import settings
+from app.core.rate_limit import get_redis
 from app.database import get_db
 from app.models.integration import Integration
 from app.models.routing import RoutingRule
 from app.models.user import User
-from app.schemas.integration import IntegrationCreate, IntegrationResponse
+from app.schemas.integration import (
+    IntegrationConfigureRequest,
+    IntegrationCreate,
+    IntegrationResponse,
+    ProviderCatalogItem,
+)
 from app.schemas.routing import RoutingRuleCreate, RoutingRuleResponse
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
+# ---------------------------------------------------------------------------
+# Provider catalog — defines every integration the product supports.
+# "status" and "meta" are merged from the DB at request time.
+# ---------------------------------------------------------------------------
+_CATALOG: dict[str, dict] = {
+    "github": {
+        "name": "GitHub",
+        "description": "Two-way sync for issues, pull requests, and commit metadata.",
+        "scopes": ["read", "write:issues"],
+        "coming_soon": False,
+    },
+    "linear": {
+        "name": "Linear",
+        "description": "Streamline issue creation and track project progress directly from feedback.",
+        "scopes": ["read", "write"],
+        "coming_soon": False,
+    },
+    "slack": {
+        "name": "Slack",
+        "description": "Receive real-time notifications and capture feedback straight from channels.",
+        "scopes": ["channels:read", "chat:write"],
+        "coming_soon": False,
+    },
+    "discord": {
+        "name": "Discord",
+        "description": "Engage your community and collect bug reports directly from Discord servers.",
+        "scopes": ["guilds", "messages"],
+        "coming_soon": False,
+    },
+    "jira": {
+        "name": "Jira Software",
+        "description": "Enterprise-grade issue tracking and sprint planning integration.",
+        "scopes": [],
+        "coming_soon": True,
+    },
+}
+
+# OAuth state TTL (seconds) — stored in Redis to prevent CSRF on callback
+_OAUTH_STATE_TTL = 600
+
+
+async def _get_integration(db: AsyncSession, tenant_id: str, provider: str) -> Integration | None:
+    result = await db.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == provider,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+# ---------------------------------------------------------------------------
+# Catalog + list
+# ---------------------------------------------------------------------------
+
+@router.get("/providers")
+async def list_providers():
+    """All supported integration providers with capability metadata."""
+    return {"success": True, "data": list(_CATALOG.items())}
+
+
+@router.get("")
+async def list_integrations(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Full provider catalog merged with the tenant's connected integrations."""
+    tenant_id = current_user.tenant_id
+    result = await db.execute(select(Integration).where(Integration.tenant_id == tenant_id))
+    connected = {row.provider: row for row in result.scalars().all()}
+
+    items = []
+    for provider, info in _CATALOG.items():
+        row = connected.get(provider)
+        items.append(
+            ProviderCatalogItem(
+                provider=provider,
+                name=info["name"],
+                description=info["description"],
+                scopes=info["scopes"],
+                coming_soon=info["coming_soon"],
+                status="connected" if row else "not_connected",
+                last_sync_at=row.last_sync_at if row else None,
+                meta=row.config if row else None,
+                integration_id=row.id if row else None,
+            )
+        )
+
+    return {"success": True, "data": [i.model_dump() for i in items]}
+
+
+# ---------------------------------------------------------------------------
+# OAuth — step 1: get authorization URL
+# ---------------------------------------------------------------------------
+
+@router.get("/{provider}/oauth-url")
+async def get_oauth_url(
+    provider: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Return the OAuth authorization URL for the given provider."""
+    if provider not in _CATALOG or _CATALOG[provider]["coming_soon"]:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider}' not available")
+
+    state = secrets.token_urlsafe(32)
+    try:
+        r = await get_redis()
+        await r.setex(f"oauth_state:{state}", _OAUTH_STATE_TTL, current_user.tenant_id)
+    except Exception:
+        pass  # Redis unavailable — state validation degraded but not blocking
+
+    if provider == "github":
+        if not settings.github_client_id:
+            raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
+        redirect = settings.github_integration_redirect_uri or settings.github_redirect_uri
+        url = (
+            f"https://github.com/login/oauth/authorize"
+            f"?client_id={settings.github_client_id}"
+            f"&redirect_uri={redirect}"
+            f"&scope=repo,read:org"
+            f"&state={state}"
+        )
+    elif provider == "linear":
+        if not settings.linear_client_id:
+            raise HTTPException(status_code=503, detail="Linear OAuth not configured")
+        url = (
+            f"https://linear.app/oauth/authorize"
+            f"?client_id={settings.linear_client_id}"
+            f"&redirect_uri={settings.linear_redirect_uri}"
+            f"&response_type=code"
+            f"&scope=read,write"
+            f"&state={state}"
+        )
+    elif provider == "slack":
+        if not settings.slack_client_id:
+            raise HTTPException(status_code=503, detail="Slack OAuth not configured")
+        url = (
+            f"https://slack.com/oauth/v2/authorize"
+            f"?client_id={settings.slack_client_id}"
+            f"&redirect_uri={settings.slack_redirect_uri}"
+            f"&scope=channels:read,chat:write,incoming-webhook"
+            f"&state={state}"
+        )
+    else:
+        raise HTTPException(status_code=400, detail=f"OAuth not implemented for '{provider}'")
+
+    return {"success": True, "data": {"url": url, "state": state}}
+
+
+# ---------------------------------------------------------------------------
+# Shared OAuth token exchange (used by both GET and POST callbacks)
+# ---------------------------------------------------------------------------
+
+async def _exchange_oauth_code(provider: str, code: str) -> dict:
+    """Exchange an OAuth authorization code for credentials. Raises ValueError on failure."""
+    async with httpx.AsyncClient() as client:
+        if provider == "github":
+            resp = await client.post(
+                "https://github.com/login/oauth/access_token",
+                data={
+                    "client_id": settings.github_client_id,
+                    "client_secret": settings.github_client_secret,
+                    "code": code,
+                },
+                headers={"Accept": "application/json"},
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"GitHub token exchange failed: {data.get('error_description', data)}")
+            return {"access_token": data["access_token"], "token_type": "bearer"}
+
+        elif provider == "linear":
+            resp = await client.post(
+                "https://api.linear.app/oauth/token",
+                data={
+                    "client_id": settings.linear_client_id,
+                    "client_secret": settings.linear_client_secret,
+                    "redirect_uri": settings.linear_redirect_uri,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"Linear token exchange failed: {data}")
+            return {"access_token": data["access_token"]}
+
+        elif provider == "slack":
+            resp = await client.post(
+                "https://slack.com/api/oauth.v2.access",
+                data={
+                    "client_id": settings.slack_client_id,
+                    "client_secret": settings.slack_client_secret,
+                    "redirect_uri": settings.slack_redirect_uri,
+                    "code": code,
+                },
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if not data.get("ok"):
+                raise ValueError(f"Slack token exchange failed: {data.get('error')}")
+            return {
+                "access_token": data.get("access_token"),
+                "bot_token": data.get("access_token"),
+                "team_id": data.get("team", {}).get("id"),
+                "team_name": data.get("team", {}).get("name"),
+                "incoming_webhook": data.get("incoming_webhook", {}).get("url"),
+            }
+
+        else:
+            raise ValueError(f"OAuth not implemented for '{provider}'")
+
+
+async def _upsert_integration(
+    db: AsyncSession, tenant_id: str, provider: str, credentials: dict
+) -> Integration:
+    integration = await _get_integration(db, tenant_id, provider)
+    if integration:
+        integration.credentials = credentials
+        integration.status = "active"
+    else:
+        integration = Integration(
+            tenant_id=tenant_id,
+            provider=provider,
+            credentials=credentials,
+            status="active",
+        )
+        db.add(integration)
+    await db.commit()
+    await db.refresh(integration)
+    return integration
+
+
+# ---------------------------------------------------------------------------
+# OAuth — step 1 callback
+# GET  = browser redirect from the provider (no auth cookie, tenant from Redis state)
+# POST = API call from frontend after it receives the code (auth cookie present)
+# ---------------------------------------------------------------------------
+
+@router.get("/{provider}/callback")
+async def oauth_callback_browser(
+    provider: str,
+    code: str,
+    state: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Browser-facing callback — Slack/GitHub redirect here after the user authorises.
+    Exchanges the code, saves credentials, then redirects to the frontend.
+    Tenant is identified via the state token stored in Redis (no auth cookie needed).
+    """
+    if provider not in _CATALOG or _CATALOG[provider]["coming_soon"]:
+        return RedirectResponse(
+            url=f"{settings.allowed_origins}/integrations?error=unsupported_provider"
+        )
+
+    # Resolve tenant from Redis state
+    tenant_id: str | None = None
+    try:
+        r = await get_redis()
+        tenant_id = await r.get(f"oauth_state:{state}")
+        await r.delete(f"oauth_state:{state}")
+    except Exception:
+        pass
+
+    if not tenant_id:
+        return RedirectResponse(
+            url=f"{settings.allowed_origins}/integrations?error=invalid_state"
+        )
+
+    try:
+        credentials = await _exchange_oauth_code(provider, code)
+    except ValueError:
+        return RedirectResponse(
+            url=f"{settings.allowed_origins}/integrations?error=oauth_failed&provider={provider}"
+        )
+
+    await _upsert_integration(db, tenant_id, provider, credentials)
+    return RedirectResponse(
+        url=f"{settings.allowed_origins}/integrations?connected={provider}"
+    )
+
+
+@router.post("/{provider}/callback")
+async def oauth_callback_api(
+    provider: str,
+    code: str,
+    state: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    API-facing callback — frontend calls this after receiving the code from the redirect.
+    Requires the user's auth cookie (current_user).
+    """
+    if provider not in _CATALOG or _CATALOG[provider]["coming_soon"]:
+        raise HTTPException(status_code=400, detail=f"Provider '{provider}' not available")
+
+    # Validate state
+    try:
+        r = await get_redis()
+        stored_tenant = await r.get(f"oauth_state:{state}")
+        if stored_tenant and stored_tenant != current_user.tenant_id:
+            raise HTTPException(status_code=400, detail="Invalid OAuth state")
+        await r.delete(f"oauth_state:{state}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    try:
+        credentials = await _exchange_oauth_code(provider, code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    integration = await _upsert_integration(db, current_user.tenant_id, provider, credentials)
+    return {"success": True, "data": IntegrationResponse.model_validate(integration).model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Step 2: list available resources (repos, teams, channels)
+# ---------------------------------------------------------------------------
+
+@router.get("/github/repos")
+async def list_github_repos(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List repositories accessible with the stored GitHub token."""
+    integration = await _get_integration(db, current_user.tenant_id, "github")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="GitHub not connected")
+
+    token = integration.credentials.get("access_token")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            "https://api.github.com/user/repos",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            params={"per_page": 100, "sort": "updated"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Failed to fetch GitHub repos")
+
+    repos = [
+        {
+            "id": r["id"],
+            "full_name": r["full_name"],
+            "private": r["private"],
+            "description": r.get("description"),
+            "updated_at": r.get("updated_at"),
+        }
+        for r in resp.json()
+    ]
+    return {"success": True, "data": repos}
+
+
+@router.get("/linear/teams")
+async def list_linear_teams(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List Linear teams accessible with the stored Linear token."""
+    integration = await _get_integration(db, current_user.tenant_id, "linear")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="Linear not connected")
+
+    token = integration.credentials.get("access_token")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.linear.app/graphql",
+            json={"query": "{ teams { nodes { id name description } } }"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Failed to fetch Linear teams")
+
+    data = resp.json()
+    teams = data.get("data", {}).get("teams", {}).get("nodes", [])
+    return {"success": True, "data": teams}
+
+
+@router.get("/slack/channels")
+async def list_slack_channels(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List public Slack channels accessible with the stored bot token."""
+    integration = await _get_integration(db, current_user.tenant_id, "slack")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="Slack not connected")
+
+    token = integration.credentials.get("bot_token") or integration.credentials.get("access_token")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            "https://slack.com/api/conversations.list",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": 200, "exclude_archived": "true"},
+        )
+    data = resp.json() if resp.status_code == 200 else {}
+    if not data.get("ok"):
+        raise HTTPException(status_code=502, detail="Failed to fetch Slack channels")
+
+    channels = [
+        {"id": c["id"], "name": c["name"], "is_private": c.get("is_private", False)}
+        for c in data.get("channels", [])
+    ]
+    return {"success": True, "data": channels}
+
+
+# ---------------------------------------------------------------------------
+# Step 3: save configuration (repos/teams/channels + routing rules)
+# ---------------------------------------------------------------------------
+
+@router.post("/{provider}/configure")
+async def configure_integration(
+    provider: str,
+    body: IntegrationConfigureRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Persist the user's selections from wizard steps 2+3:
+    - repos/teams/channels to sync
+    - optional routing rules
+    Updates integration.config and creates routing rules.
+    """
+    integration = await _get_integration(db, current_user.tenant_id, provider)
+    if not integration:
+        raise HTTPException(status_code=404, detail=f"{provider} integration not found")
+
+    # Build meta stats from selections
+    selections = body.selections
+    meta: dict = dict(integration.config or {})
+
+    if provider == "github":
+        repos = selections.get("repos", [])
+        meta["active_repos"] = len(repos)
+        meta["repo_names"] = repos
+    elif provider == "linear":
+        teams = selections.get("teams", [])
+        meta["mapped_teams"] = len(teams)
+        meta["team_ids"] = [t.get("id") if isinstance(t, dict) else t for t in teams]
+    elif provider == "slack":
+        channels = selections.get("channels", [])
+        meta["active_channels"] = len(channels)
+        meta["channel_ids"] = [c.get("id") if isinstance(c, dict) else c for c in channels]
+
+    integration.config = meta
+
+    # Persist any routing rules included in step 3
+    for rule_data in body.routing_rules:
+        rule = RoutingRule(
+            tenant_id=current_user.tenant_id,
+            condition=rule_data.get("condition", {}),
+            action_type=rule_data.get("action_type", ""),
+            action_config=rule_data.get("action_config", {}),
+        )
+        db.add(rule)
+
+    await db.commit()
+    await db.refresh(integration)
+    return {"success": True, "data": IntegrationResponse.model_validate(integration).model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Disconnect
+# ---------------------------------------------------------------------------
+
+@router.delete("/{provider}")
+async def disconnect_integration(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove a connected integration and its credentials."""
+    integration = await _get_integration(db, current_user.tenant_id, provider)
+    if not integration:
+        raise HTTPException(status_code=404, detail=f"{provider} integration not found")
+
+    await db.delete(integration)
+    await db.commit()
+    return {"success": True, "message": f"{provider} disconnected"}
+
+
+# ---------------------------------------------------------------------------
+# Raw create (internal / webhook-based connections)
+# ---------------------------------------------------------------------------
 
 @router.post("", response_model=IntegrationResponse)
 async def create_integration(
@@ -31,19 +529,9 @@ async def create_integration(
     return integration
 
 
-@router.get("")
-async def list_integrations(
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    tenant_id = current_user.tenant_id
-    result = await db.execute(select(Integration).where(Integration.tenant_id == tenant_id))
-    items = result.scalars().all()
-    return {
-        "success": True,
-        "message": [IntegrationResponse.model_validate(i).model_dump() for i in items],
-    }
-
+# ---------------------------------------------------------------------------
+# Routing rules
+# ---------------------------------------------------------------------------
 
 @router.post("/routing-rules", response_model=RoutingRuleResponse)
 async def create_routing_rule(

@@ -1,11 +1,13 @@
 import hashlib
 import hmac
 import json
+import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.models.feedback import FeedbackItem
 from app.models.integration import Integration
@@ -143,5 +145,113 @@ async def jira_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         await db.commit()
         await db.refresh(item)
         start_feedback_pipeline.delay(item.id, integration.tenant_id)
+
+    return {"success": True, "message": {"received": True}}
+
+
+# ── Slack Events API ──────────────────────────────────────────────────────────
+
+def _verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
+    """Verify Slack request using the signing secret (prevents spoofed events)."""
+    if not settings.slack_signing_secret:
+        return False
+    if not timestamp or abs(time.time() - int(timestamp)) > 300:
+        return False
+    base = f"v0:{timestamp}:{body.decode('utf-8')}"
+    expected = "v0=" + hmac.new(
+        settings.slack_signing_secret.encode("utf-8"),
+        base.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@router.post("/slack")
+async def slack_events(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Slack Events API endpoint.
+    Handles url_verification challenge + message.channels / app_mention events.
+
+    Setup in your Slack app:
+      Event Subscriptions → Request URL → https://<your-domain>/v1/webhooks/slack
+      Subscribe to bot events: message.channels, message.groups, app_mention
+    """
+    body = await _read_body(request)
+
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if settings.slack_signing_secret and not _verify_slack_signature(body, timestamp, signature):
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+    payload = json.loads(body)
+
+    # One-time URL verification Slack sends when you save the endpoint
+    if payload.get("type") == "url_verification":
+        return Response(content=payload["challenge"], media_type="text/plain")
+
+    # Ignore Slack retries to prevent duplicate feedback items
+    if request.headers.get("X-Slack-Retry-Reason") == "http_timeout":
+        return {"success": True, "message": {"received": True}}
+
+    event = payload.get("event", {})
+    event_type = event.get("type", "")
+
+    # Skip bot messages and edits
+    if event.get("bot_id") or event.get("subtype"):
+        return {"success": True, "message": {"received": True}}
+
+    if event_type not in ("message", "app_mention"):
+        return {"success": True, "message": {"received": True}}
+
+    text = (event.get("text") or "").strip()
+    if not text:
+        return {"success": True, "message": {"received": True}}
+
+    team_id = payload.get("team_id", "")
+
+    # Resolve tenant by matching team_id stored in integration credentials
+    result = await db.execute(
+        select(Integration).where(
+            Integration.provider == "slack",
+            Integration.status == "active",
+        )
+    )
+    integration = None
+    for row in result.scalars().all():
+        if (row.credentials or {}).get("team_id") == team_id:
+            integration = row
+            break
+
+    if not integration:
+        return {"success": True, "message": {"received": True}}
+
+    channel = event.get("channel", "unknown")
+    ts = event.get("ts", "")
+    user = event.get("user", "unknown")
+    external_id = f"slack-{channel}-{ts}"
+
+    # Deduplicate: skip if this message was already ingested
+    existing = await db.scalar(
+        select(FeedbackItem).where(
+            FeedbackItem.tenant_id == integration.tenant_id,
+            FeedbackItem.source == "slack",
+            FeedbackItem.external_id == external_id,
+        )
+    )
+    if existing:
+        return {"success": True, "message": {"received": True}}
+
+    item = FeedbackItem(
+        tenant_id=integration.tenant_id,
+        source="slack",
+        external_id=external_id,
+        title=text[:200],
+        body=text,
+        author_handle=user,
+    )
+    db.add(item)
+    await db.commit()
+    await db.refresh(item)
+    start_feedback_pipeline.delay(item.id, integration.tenant_id)
 
     return {"success": True, "message": {"received": True}}

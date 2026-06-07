@@ -4,3 +4,8 @@ Traceback (most recent call last):
     version = _bcrypt.__about__.__version__
               ^^^^^^^^^^^^^^^^^
 AttributeError: module 'bcrypt' has no attribute '__about__'
+HTTP Request: GET https://slack.com/api/conversations.list?limit=200&exclude_archived=true "HTTP/1.1 200 OK"
+HTTP Request: GET https://slack.com/api/conversations.list?limit=200&exclude_archived=true "HTTP/1.1 200 OK"
+HTTP Request: POST https://slack.com/api/oauth.v2.access "HTTP/1.1 200 OK"
+HTTP Request: GET https://slack.com/api/conversations.list?limit=200&exclude_archived=true "HTTP/1.1 200 OK"
+HTTP Request: GET https://slack.com/api/conversations.list?limit=200&exclude_archived=true "HTTP/1.1 200 OK"
