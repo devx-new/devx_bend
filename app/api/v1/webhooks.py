@@ -177,17 +177,18 @@ async def slack_events(request: Request, db: AsyncSession = Depends(get_db)):
       Subscribe to bot events: message.channels, message.groups, app_mention
     """
     body = await _read_body(request)
+    payload = json.loads(body)
 
+    # Handle URL verification BEFORE signature check — Slack sends this once
+    # during setup to confirm the endpoint is reachable; it has no signature.
+    if payload.get("type") == "url_verification":
+        return Response(content=payload["challenge"], media_type="text/plain")
+
+    # All real event callbacks must carry a valid signature
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
     if settings.slack_signing_secret and not _verify_slack_signature(body, timestamp, signature):
         raise HTTPException(status_code=401, detail="Invalid Slack signature")
-
-    payload = json.loads(body)
-
-    # One-time URL verification Slack sends when you save the endpoint
-    if payload.get("type") == "url_verification":
-        return Response(content=payload["challenge"], media_type="text/plain")
 
     # Ignore Slack retries to prevent duplicate feedback items
     if request.headers.get("X-Slack-Retry-Reason") == "http_timeout":

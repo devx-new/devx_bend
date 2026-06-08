@@ -2,7 +2,7 @@ import asyncio
 from celery import shared_task
 from sqlalchemy import select
 
-from app.database import async_session_factory
+from app.database import async_session_factory, run_in_celery
 from app.models.feedback import FeedbackItem, DuplicateGroup
 
 
@@ -15,8 +15,11 @@ async def _dedup_feedback_async(feedback_item_id: str, tenant_id: str) -> dict:
             )
         )
         item = result.scalar_one_or_none()
-        if not item or not item.embedding:
-            return {"error": "Feedback not found or missing embedding"}
+        if not item:
+            return {"error": "Feedback not found"}
+        if not item.embedding:
+            # Embedding unavailable (e.g. external API unreachable) — skip dedup, continue pipeline
+            return {"feedback_item_id": feedback_item_id, "tenant_id": tenant_id, "status": "dedup_skipped"}
 
         # Perform pgvector cosine similarity search (>0.88 means distance < 0.12)
         # We search for items in the same tenant, excluding the current item itself.
@@ -50,4 +53,4 @@ def dedup_feedback(self, previous_result: dict) -> dict:
     """Detect duplicates using cosine similarity (>0.88)."""
     if "error" in previous_result:
         return previous_result
-    return asyncio.run(_dedup_feedback_async(previous_result["feedback_item_id"], previous_result["tenant_id"]))
+    return run_in_celery(_dedup_feedback_async(previous_result["feedback_item_id"], previous_result["tenant_id"]))

@@ -54,9 +54,9 @@ _CATALOG: dict[str, dict] = {
     },
     "jira": {
         "name": "Jira Software",
-        "description": "Enterprise-grade issue tracking and sprint planning integration.",
-        "scopes": [],
-        "coming_soon": True,
+        "description": "Automatically create Jira issues from incoming feedback.",
+        "scopes": ["read:jira-work", "write:jira-work"],
+        "coming_soon": False,
     },
 }
 
@@ -163,8 +163,21 @@ async def get_oauth_url(
             f"https://slack.com/oauth/v2/authorize"
             f"?client_id={settings.slack_client_id}"
             f"&redirect_uri={settings.slack_redirect_uri}"
-            f"&scope=channels:read,chat:write,incoming-webhook"
+            f"&scope=channels:read,channels:history,groups:history,app_mentions:read,chat:write"
             f"&state={state}"
+        )
+    elif provider == "jira":
+        if not settings.jira_client_id:
+            raise HTTPException(status_code=503, detail="Jira OAuth not configured")
+        url = (
+            f"https://auth.atlassian.com/authorize"
+            f"?audience=api.atlassian.com"
+            f"&client_id={settings.jira_client_id}"
+            f"&scope=read:jira-work%20write:jira-work%20offline_access"
+            f"&redirect_uri={settings.jira_redirect_uri}"
+            f"&state={state}"
+            f"&response_type=code"
+            f"&prompt=consent"
         )
     else:
         raise HTTPException(status_code=400, detail=f"OAuth not implemented for '{provider}'")
@@ -230,6 +243,37 @@ async def _exchange_oauth_code(provider: str, code: str) -> dict:
                 "team_id": data.get("team", {}).get("id"),
                 "team_name": data.get("team", {}).get("name"),
                 "incoming_webhook": data.get("incoming_webhook", {}).get("url"),
+            }
+
+        elif provider == "jira":
+            resp = await client.post(
+                "https://auth.atlassian.com/oauth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "client_id": settings.jira_client_id,
+                    "client_secret": settings.jira_client_secret,
+                    "code": code,
+                    "redirect_uri": settings.jira_redirect_uri,
+                },
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"Jira token exchange failed: {data}")
+
+            # Fetch the Atlassian cloud ID required for all API calls
+            resources_resp = await client.get(
+                "https://api.atlassian.com/oauth/token/accessible-resources",
+                headers={"Authorization": f"Bearer {data['access_token']}"},
+            )
+            resources = resources_resp.json() if resources_resp.status_code == 200 else []
+            cloud_id = resources[0]["id"] if resources else None
+            cloud_url = resources[0]["url"] if resources else None
+
+            return {
+                "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token"),
+                "cloud_id": cloud_id,
+                "cloud_url": cloud_url,
             }
 
         else:
@@ -432,6 +476,38 @@ async def list_slack_channels(
     return {"success": True, "data": channels}
 
 
+@router.get("/jira/projects")
+async def list_jira_projects(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List Jira projects accessible with the stored OAuth token."""
+    integration = await _get_integration(db, current_user.tenant_id, "jira")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="Jira not connected")
+
+    token = integration.credentials.get("access_token")
+    cloud_id = integration.credentials.get("cloud_id")
+    if not cloud_id:
+        raise HTTPException(status_code=400, detail="Jira cloud ID missing — reconnect the integration")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/project/search",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            params={"maxResults": 50},
+        )
+    data = resp.json() if resp.status_code == 200 else {}
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Failed to fetch Jira projects")
+
+    projects = [
+        {"id": p["id"], "key": p["key"], "name": p["name"]}
+        for p in data.get("values", [])
+    ]
+    return {"success": True, "data": projects}
+
+
 # ---------------------------------------------------------------------------
 # Step 3: save configuration (repos/teams/channels + routing rules)
 # ---------------------------------------------------------------------------
@@ -469,6 +545,10 @@ async def configure_integration(
         channels = selections.get("channels", [])
         meta["active_channels"] = len(channels)
         meta["channel_ids"] = [c.get("id") if isinstance(c, dict) else c for c in channels]
+    elif provider == "jira":
+        projects = selections.get("projects", [])
+        meta["project_keys"] = [p.get("key") if isinstance(p, dict) else p for p in projects]
+        meta["active_projects"] = len(projects)
 
     integration.config = meta
 

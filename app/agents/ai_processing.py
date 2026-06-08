@@ -1,14 +1,13 @@
-import asyncio
 import logging
 
 import httpx
 from celery import shared_task
-from openai import AsyncOpenAI
+from openai import OpenAI
 from sqlalchemy import select
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 from app.config import settings
-from app.database import async_session_factory
+from app.database import async_session_factory, run_in_celery
 from app.models.audit import AuditLog
 from app.models.feedback import FeedbackItem, FeedbackTag
 
@@ -20,8 +19,8 @@ NVIDIA_CLASSIFY_MODEL = "meta/llama-3.1-8b-instruct"  # lightweight for classify
 CATEGORIES = ["bug", "feature", "docs", "performance", "security"]
 
 
-def _get_nvidia_client() -> AsyncOpenAI:
-    return AsyncOpenAI(
+def _get_nvidia_client() -> OpenAI:
+    return OpenAI(
         base_url=NVIDIA_BASE_URL,
         api_key=settings.nvidia_api_key,
     )
@@ -48,8 +47,8 @@ async def _embed_feedback_async(feedback_item_id: str, tenant_id: str) -> dict:
         headers = {"Authorization": f"Bearer {settings.huggingface_api_key}"}
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
+            with httpx.Client() as client:
+                response = client.post(
                     api_url,
                     headers=headers,
                     json={"inputs": item.body},
@@ -77,7 +76,7 @@ def embed_feedback(self, previous_result: dict) -> dict:
     """Stage 2 — Generate 384-dimensional embeddings using all-MiniLM-L6-v2."""
     if "error" in previous_result:
         return previous_result
-    return asyncio.run(
+    return run_in_celery(
         _embed_feedback_async(previous_result["feedback_item_id"], previous_result["tenant_id"])
     )
 
@@ -111,7 +110,7 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
         if settings.nvidia_api_key:
             try:
                 client = _get_nvidia_client()
-                response = await client.chat.completions.create(
+                response = client.chat.completions.create(
                     model=NVIDIA_CLASSIFY_MODEL,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
@@ -176,7 +175,7 @@ def classify_feedback(self, previous_result: dict) -> dict:
     """Stage 4 — Categorize using NVIDIA NIM (Llama 3.1 8B), Gemini as fallback."""
     if "error" in previous_result:
         return previous_result
-    return asyncio.run(
+    return run_in_celery(
         _classify_feedback_async(previous_result["feedback_item_id"], previous_result["tenant_id"])
     )
 
@@ -235,6 +234,6 @@ def analyze_sentiment(self, previous_result: dict) -> dict:
     """Stage 5 — Analyze sentiment (-1.0 to +1.0) using VADER. <-0.6 = critical."""
     if "error" in previous_result:
         return previous_result
-    return asyncio.run(
+    return run_in_celery(
         _analyze_sentiment_async(previous_result["feedback_item_id"], previous_result["tenant_id"])
     )

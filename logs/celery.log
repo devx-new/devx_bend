@@ -1,0 +1,27 @@
+ 
+ -------------- celery@haroffcode-Swift-SF314-512T v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-6.17.0-35-generic-x86_64-with-glibc2.39 2026-06-07 21:40:01
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         dfp_worker:0x74a7bed96900
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 16 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . app.agents.ai_processing.analyze_sentiment
+  . app.agents.ai_processing.classify_feedback
+  . app.agents.ai_processing.embed_feedback
+  . app.agents.deduplication.dedup_feedback
+  . app.agents.digest.generate_weekly_digest
+  . app.agents.ingestion.normalize_feedback
+  . app.agents.prioritization.calculate_priority
+  . app.agents.routing.route_feedback
+  . app.worker.orchestrator.start_feedback_pipeline
+

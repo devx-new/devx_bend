@@ -7,7 +7,7 @@ from sqlalchemy import select, desc
 from google import genai
 from google.genai import types
 
-from app.database import async_session_factory
+from app.database import async_session_factory, run_in_celery
 from app.models.tenant import Tenant
 from app.models.feedback import FeedbackItem
 from app.models.digest import WeeklyDigest
@@ -157,5 +157,5 @@ async def _generate_digest_for_tenant_async(tenant_id: str) -> WeeklyDigest | No
 @shared_task(bind=True, max_retries=3)
 def generate_weekly_digest(self) -> dict:
     """Generate weekly summaries via Gemini API for all tenants."""
-    return asyncio.run(_generate_weekly_digest_async())
+    return run_in_celery(_generate_weekly_digest_async())
 

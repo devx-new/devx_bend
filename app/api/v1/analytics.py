@@ -67,7 +67,7 @@ async def analytics_kpis(
         r = await get_redis()
         cached = await r.get(cache_key)
         if cached:
-            return {"success": True, "data": json.loads(cached), "meta": {"cached": True}}
+            return {"success": True, "data": json.loads(cached)}
     except Exception:
         pass
 
@@ -185,7 +185,7 @@ async def analytics_kpis(
     except Exception:
         pass
 
-    return {"success": True, "data": data, "meta": {"cached": False}}
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ async def analytics_trends(
         r = await get_redis()
         cached = await r.get(cache_key)
         if cached:
-            return {"success": True, "data": json.loads(cached), "meta": {"cached": True}}
+            return {"success": True, "data": json.loads(cached)}
     except Exception:
         pass
 
@@ -324,7 +324,7 @@ async def analytics_trends(
     except Exception:
         pass
 
-    return {"success": True, "data": data, "meta": {"cached": False}}
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------

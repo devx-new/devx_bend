@@ -1,12 +1,11 @@
-import asyncio
 import logging
 
 from celery import shared_task
-from openai import AsyncOpenAI
+from openai import OpenAI
 from sqlalchemy import select
 
 from app.config import settings
-from app.database import async_session_factory
+from app.database import async_session_factory, run_in_celery
 from app.models.audit import AuditLog
 from app.models.feedback import FeedbackItem
 
@@ -16,8 +15,8 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_PRIORITY_MODEL = "meta/llama-3.1-8b-instruct"
 
 
-def _get_nvidia_client() -> AsyncOpenAI:
-    return AsyncOpenAI(
+def _get_nvidia_client() -> OpenAI:
+    return OpenAI(
         base_url=NVIDIA_BASE_URL,
         api_key=settings.nvidia_api_key,
     )
@@ -53,7 +52,7 @@ async def _calculate_priority_async(feedback_item_id: str, tenant_id: str) -> di
         if settings.nvidia_api_key:
             try:
                 client = _get_nvidia_client()
-                response = await client.chat.completions.create(
+                response = client.chat.completions.create(
                     model=NVIDIA_PRIORITY_MODEL,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
@@ -131,7 +130,7 @@ def calculate_priority(self, previous_result: dict) -> dict:
     """
     if "error" in previous_result:
         return previous_result
-    return asyncio.run(
+    return run_in_celery(
         _calculate_priority_async(
             previous_result["feedback_item_id"], previous_result["tenant_id"]
         )

@@ -3,7 +3,7 @@ import re
 from celery import shared_task
 from sqlalchemy import select
 
-from app.database import async_session_factory
+from app.database import async_session_factory, run_in_celery
 from app.models.feedback import FeedbackItem
 from app.models.audit import AuditLog
 
@@ -47,4 +47,4 @@ async def _normalize_feedback_async(feedback_item_id: str, tenant_id: str) -> di
 @shared_task(bind=True, max_retries=3)
 def normalize_feedback(self, feedback_item_id: str, tenant_id: str) -> dict:
     """Normalize incoming text, strip HTML, and prepare it for embedding."""
-    return asyncio.run(_normalize_feedback_async(feedback_item_id, tenant_id))
+    return run_in_celery(_normalize_feedback_async(feedback_item_id, tenant_id))
