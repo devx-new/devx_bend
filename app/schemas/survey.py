@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -14,6 +15,6 @@ class SurveyResponse(BaseModel):
     score: int
     comment: str | None
     survey_type: str | None
-    submitted_at: str
+    submitted_at: datetime
 
     model_config = {"from_attributes": True}
