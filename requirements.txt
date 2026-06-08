@@ -18,8 +18,11 @@ celery
 aiosqlite
 vaderSentiment
 pgvector
+sentence-transformers
 openai # for the llama model from nvidia
 # --- test dependencies ---
 pytest
 pytest-asyncio
 httpx
+
+# 

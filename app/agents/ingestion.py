@@ -21,9 +21,35 @@ async def _normalize_feedback_async(feedback_item_id: str, tenant_id: str) -> di
             return {"error": "Feedback not found"}
 
         original_body = item.body or ""
-        
-        # INGEST-003: Normalize data. Strip basic HTML tags.
-        normalized_body = re.sub(r'<[^>]+>', '', original_body)
+
+        # Strip the Priority/Sentiment header our pipeline injects into GitHub issue bodies
+        normalized_body = re.sub(
+            r"^\s*\*\*Priority:\*\*[^\n]*\n\*\*Sentiment:\*\*[^\n]*\n+",
+            "",
+            original_body,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # Strip markdown headings (## Title, ### Section)
+        normalized_body = re.sub(r"^#{1,6}\s+", "", normalized_body, flags=re.MULTILINE)
+
+        # Strip markdown bold/italic (**text**, *text*, __text__, _text_)
+        normalized_body = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", normalized_body)
+        normalized_body = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", normalized_body)
+
+        # Strip markdown links [text](url) → text
+        normalized_body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", normalized_body)
+
+        # Strip inline code `code` → code
+        normalized_body = re.sub(r"`([^`]+)`", r"\1", normalized_body)
+
+        # Strip fenced code blocks ```...```
+        normalized_body = re.sub(r"```[\s\S]*?```", "", normalized_body)
+
+        # Strip HTML tags
+        normalized_body = re.sub(r'<[^>]+>', '', normalized_body)
+
+        # Collapse whitespace
         normalized_body = " ".join(normalized_body.split())
         
         item.body = normalized_body

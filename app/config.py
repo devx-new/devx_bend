@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     jira_client_secret: str = os.getenv("jira_client_secret", "")
     jira_redirect_uri: str = os.getenv("jira_redirect_uri", "")
     allowed_origins: str = os.getenv("allowed_origins")
+    frontend_url: str = os.getenv("frontend_url", "http://localhost:5173")
+    backend_url: str = os.getenv("backend_url", "")
     cookie_secure: bool = os.getenv("cookie_secure", "False").lower() in ("true", "1")
     cookie_samesite: str = os.getenv("cookie_samesite")
     csrf_token_expire_minutes: int = int(os.getenv("csrf_token_expire_minutes", 60))

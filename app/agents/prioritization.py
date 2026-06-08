@@ -31,7 +31,10 @@ async def _calculate_priority_async(feedback_item_id: str, tenant_id: str) -> di
             )
         )
         item = result.scalar_one_or_none()
-        if not item or not item.body:
+        if not item:
+            return {"error": "Feedback not found or empty"}
+        feedback_text = " ".join(filter(None, [item.title, item.body]))
+        if not feedback_text:
             return {"error": "Feedback not found or empty"}
 
         prompt = (
@@ -39,7 +42,7 @@ async def _calculate_priority_async(feedback_item_id: str, tenant_id: str) -> di
             "Assign a priority score from 0 to 100 based on urgency and impact, "
             "where >80 = critical, >60 = high, 40-60 = medium, <40 = low.\n\n"
             f"Title: {item.title}\n"
-            f"Feedback: {item.body}\n"
+            f"Feedback: {feedback_text}\n"
             f"Sentiment (-1.0 to 1.0): {item.sentiment_score}\n"
             f"Category: {item.category}\n\n"
             "Output ONLY the integer score, nothing else."

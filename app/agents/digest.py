@@ -61,11 +61,14 @@ async def _generate_weekly_digest_async() -> dict:
                 for item in items
             ])
 
+            current_date = period_end.strftime("%B %d, %Y")
             prompt = (
-                f"You are a developer experience analyst. Below are the top {len(items)} feedback items "
-                f"from the past week for a software team.\n\n"
+                f"You are a developer experience analyst. Today is {current_date}. "
+                f"Below are the top {len(items)} feedback items from the past week for a software team.\n\n"
                 f"Feedback:\n{items_text}\n\n"
-                f"Write a concise weekly digest report in Markdown format that includes:\n"
+                f"Write a concise weekly digest report in Markdown format. "
+                f"Start with exactly: '# Weekly Developer Experience Digest' then a new line 'Date: {current_date}'. "
+                f"Do NOT use placeholder text like [Current Date]. Include these sections:\n"
                 f"1. Executive Summary (2-3 sentences)\n"
                 f"2. Top Critical Issues (if any with priority > 80)\n"
                 f"3. Top Feature Requests\n"
@@ -124,11 +127,14 @@ async def _generate_digest_for_tenant_async(tenant_id: str) -> WeeklyDigest | No
             f"Sentiment: {item.sentiment_score or 0:.2f}): {_strip_pii(item.title)}"
             for item in items
         ])
+        current_date = period_end.strftime("%B %d, %Y")
         prompt = (
-            f"You are a developer experience analyst. Below are the top {len(items)} feedback items "
-            f"from the past week for a software team.\n\n"
+            f"You are a developer experience analyst. Today is {current_date}. "
+            f"Below are the top {len(items)} feedback items from the past week for a software team.\n\n"
             f"Feedback:\n{items_text}\n\n"
-            f"Write a concise weekly digest report in Markdown format that includes:\n"
+            f"Write a concise weekly digest report in Markdown format. "
+            f"Start with exactly: '# Weekly Developer Experience Digest' then a new line 'Date: {current_date}'. "
+            f"Do NOT use placeholder text like [Current Date]. Include these sections:\n"
             f"1. Executive Summary (2-3 sentences)\n"
             f"2. Top Critical Issues (if any with priority > 80)\n"
             f"3. Top Feature Requests\n"

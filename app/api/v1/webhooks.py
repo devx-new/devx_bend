@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
@@ -71,18 +72,88 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     issue = payload.get("issue", {})
 
     if action in ("opened", "created") and issue:
-        item = FeedbackItem(
-            tenant_id=integration.tenant_id,
-            source="github",
-            external_id=f"{payload.get('repository', {}).get('full_name', '')}#{issue.get('number')}",
-            title=issue.get("title", ""),
-            body=issue.get("body", ""),
-            author_handle=issue.get("user", {}).get("login"),
+        issue_labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+        if "dfp-automated" not in issue_labels:
+            item = FeedbackItem(
+                tenant_id=integration.tenant_id,
+                source="github",
+                external_id=f"{payload.get('repository', {}).get('full_name', '')}#{issue.get('number')}",
+                title=issue.get("title", ""),
+                body=issue.get("body", ""),
+                author_handle=issue.get("user", {}).get("login"),
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            start_feedback_pipeline.delay(item.id, integration.tenant_id)
+
+    return {"success": True, "message": {"received": True}}
+
+
+@router.post("/github/{tenant_id}")
+async def github_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Per-tenant GitHub webhook endpoint.
+    GitHub sends issue events here; the tenant is identified via the URL path
+    rather than a custom header that GitHub cannot add.
+    Register this URL when configuring the GitHub integration.
+    """
+    result = await db.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "github",
+            Integration.status == "active",
         )
-        db.add(item)
-        await db.commit()
-        await db.refresh(item)
-        start_feedback_pipeline.delay(item.id, integration.tenant_id)
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(status_code=400, detail="No active GitHub integration for this tenant")
+
+    secret = integration.webhook_secret or (integration.credentials or {}).get("webhook_secret")
+    if not secret:
+        raise HTTPException(status_code=500, detail="GitHub integration webhook_secret not configured")
+
+    body = await _read_body(request)
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not _verify_hmac(body, signature, secret):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    event_type = request.headers.get("x-github-event", "")
+    if event_type != "issues":
+        return {"success": True, "message": {"received": True}}
+
+    payload = json.loads(body)
+    action = payload.get("action")
+    issue = payload.get("issue", {})
+
+    if action == "opened" and issue:
+        # Skip issues our own pipeline created to prevent re-ingestion loops
+        issue_labels = [lbl.get("name", "") for lbl in issue.get("labels", [])]
+        if "dfp-automated" in issue_labels:
+            return {"success": True, "message": {"received": True}}
+
+        repo_name = payload.get("repository", {}).get("full_name", "")
+        external_id = f"{repo_name}#{issue.get('number')}"
+        existing = await db.scalar(
+            select(FeedbackItem).where(
+                FeedbackItem.tenant_id == tenant_id,
+                FeedbackItem.source == "github",
+                FeedbackItem.external_id == external_id,
+            )
+        )
+        if not existing:
+            item = FeedbackItem(
+                tenant_id=tenant_id,
+                source="github",
+                external_id=external_id,
+                title=issue.get("title", ""),
+                body=issue.get("body", "") or "",
+                author_handle=issue.get("user", {}).get("login"),
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            start_feedback_pipeline.delay(item.id, tenant_id)
 
     return {"success": True, "message": {"received": True}}
 
@@ -145,6 +216,96 @@ async def jira_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         await db.commit()
         await db.refresh(item)
         start_feedback_pipeline.delay(item.id, integration.tenant_id)
+
+    return {"success": True, "message": {"received": True}}
+
+
+# Jira status names that mean "done" across common workflows
+_JIRA_RESOLVED_STATUSES = {
+    "done", "closed", "resolved", "complete", "completed",
+    "won't fix", "wont fix", "cancelled", "canceled",
+}
+
+
+@router.post("/jira/{tenant_id}")
+async def jira_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Per-tenant Jira webhook.  Register this URL in your Jira project's webhook settings.
+    Handles:
+      - jira:issue_created  → ingest as new feedback
+      - jira:issue_updated  → if status changed to resolved/done, close the DevX item
+    """
+    result = await db.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "jira",
+            Integration.status == "active",
+        )
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(status_code=400, detail="No active Jira integration for this tenant")
+
+    body = await _read_body(request)
+    payload = json.loads(body)
+
+    webhook_event = payload.get("webhookEvent", "")
+    issue = payload.get("issue", {})
+    if not issue:
+        return {"success": True, "message": {"received": True}}
+
+    issue_key = issue.get("key", "")
+    fields = issue.get("fields", {})
+
+    # ── Issue created: ingest as new feedback ─────────────────────────────────
+    if webhook_event == "jira:issue_created":
+        existing = await db.scalar(
+            select(FeedbackItem).where(
+                FeedbackItem.tenant_id == tenant_id,
+                FeedbackItem.source == "jira",
+                FeedbackItem.external_id == issue_key,
+            )
+        )
+        if not existing:
+            item = FeedbackItem(
+                tenant_id=tenant_id,
+                source="jira",
+                external_id=issue_key,
+                title=fields.get("summary", ""),
+                body=(fields.get("description") or ""),
+                author_handle=(fields.get("reporter") or {}).get("displayName"),
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            start_feedback_pipeline.delay(item.id, tenant_id)
+
+    # ── Issue updated: sync status back to DevX ───────────────────────────────
+    elif webhook_event == "jira:issue_updated":
+        changelog = payload.get("changelog", {})
+        status_change = next(
+            (c for c in changelog.get("items", []) if c.get("field") == "status"),
+            None,
+        )
+        if not status_change:
+            return {"success": True, "message": {"received": True}}
+
+        new_status = (status_change.get("toString") or "").lower()
+        if new_status not in _JIRA_RESOLVED_STATUSES:
+            return {"success": True, "message": {"received": True}}
+
+        # Find the DevX feedback item that spawned this Jira ticket
+        feedback_item = await db.scalar(
+            select(FeedbackItem).where(
+                FeedbackItem.tenant_id == tenant_id,
+                FeedbackItem.jira_issue_key == issue_key,
+            )
+        )
+        if feedback_item and feedback_item.status not in ("resolved", "wont_fix"):
+            devx_status = "wont_fix" if "fix" in new_status or "cancel" in new_status else "resolved"
+            feedback_item.status = devx_status
+            feedback_item.resolved_at = datetime.now(timezone.utc)
+            await db.commit()
 
     return {"success": True, "message": {"received": True}}
 

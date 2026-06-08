@@ -17,7 +17,7 @@ async def _dedup_feedback_async(feedback_item_id: str, tenant_id: str) -> dict:
         item = result.scalar_one_or_none()
         if not item:
             return {"error": "Feedback not found"}
-        if not item.embedding:
+        if item.embedding is None:
             # Embedding unavailable (e.g. external API unreachable) — skip dedup, continue pipeline
             return {"feedback_item_id": feedback_item_id, "tenant_id": tenant_id, "status": "dedup_skipped"}
 

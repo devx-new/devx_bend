@@ -1,6 +1,5 @@
 import logging
 
-import httpx
 from celery import shared_task
 from openai import OpenAI
 from sqlalchemy import select
@@ -12,6 +11,18 @@ from app.models.audit import AuditLog
 from app.models.feedback import FeedbackItem, FeedbackTag
 
 logger = logging.getLogger(__name__)
+
+# Loaded once per worker process; subsequent tasks reuse the in-memory model
+_embed_model = None
+
+def _get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
+        logger.info("SentenceTransformer model loaded into worker")
+    return _embed_model
+
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_CLASSIFY_MODEL = "meta/llama-3.1-8b-instruct"  # lightweight for classify
@@ -37,35 +48,22 @@ async def _embed_feedback_async(feedback_item_id: str, tenant_id: str) -> dict:
             )
         )
         item = result.scalar_one_or_none()
-        if not item or not item.body:
+        if not item:
+            return {"error": "Feedback not found or empty"}
+        text_to_embed = " ".join(filter(None, [item.title, item.body]))
+        if not text_to_embed:
             return {"error": "Feedback not found or empty"}
 
-        api_url = (
-            "https://api-inference.huggingface.co/pipeline/feature-extraction/"
-            "sentence-transformers/all-MiniLM-L6-v2"
-        )
-        headers = {"Authorization": f"Bearer {settings.huggingface_api_key}"}
-
         try:
-            with httpx.Client() as client:
-                response = client.post(
-                    api_url,
-                    headers=headers,
-                    json={"inputs": item.body},
-                    timeout=15.0,
-                )
-                response.raise_for_status()
-                embedding = response.json()
-                if isinstance(embedding, list) and len(embedding) == 384:
-                    item.embedding = embedding
-                    logger.info(
-                        "Generated embedding size=%d for item=%s", len(embedding), item.id
-                    )
-                else:
-                    logger.warning("Unexpected embedding shape for item=%s", item.id)
+            model = _get_embed_model()
+            vector = model.encode(text_to_embed, normalize_embeddings=True).tolist()
+            if len(vector) == 384:
+                item.embedding = vector
+                logger.info("Generated embedding size=384 for item=%s (local)", item.id)
+            else:
+                logger.warning("Unexpected embedding size=%d for item=%s", len(vector), item.id)
         except Exception as exc:
-            logger.error("Embed failed for item=%s: %s", item.id, exc)
-            # Non-fatal: pipeline continues without embedding
+            logger.warning("Embedding skipped for item=%s: %s", item.id, exc)
 
         await session.commit()
         return {"feedback_item_id": feedback_item_id, "tenant_id": tenant_id, "status": "embedded"}
@@ -95,10 +93,11 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
         if not item:
             return {"error": "Feedback not found"}
 
+        feedback_text = " ".join(filter(None, [item.title, item.body]))
         prompt = (
             f"Classify the following developer feedback into exactly ONE of these categories: "
             f"{', '.join(CATEGORIES)}.\n\n"
-            f"Feedback: {item.body}\n\n"
+            f"Feedback: {feedback_text}\n\n"
             f"Output ONLY the category name in lowercase, nothing else."
         )
 
@@ -122,7 +121,9 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
                 model_used = NVIDIA_CLASSIFY_MODEL
                 logger.info("Classified item=%s as '%s' via NVIDIA NIM", item.id, category)
             except Exception as exc:
-                logger.warning("NVIDIA classify failed for item=%s: %s — falling back", item.id, exc)
+                logger.warning(
+                    "NVIDIA classify failed for item=%s: %s — falling back", item.id, exc
+                )
 
         # Fallback: Gemini
         if model_used == "fallback" and settings.gemini_api_key:
@@ -140,7 +141,9 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
                 category = raw if raw in CATEGORIES else "uncategorized"
                 confidence = 0.85
                 model_used = "gemini-2.5-flash"
-                logger.info("Classified item=%s as '%s' via Gemini fallback", item.id, category)
+                logger.info(
+                    "Classified item=%s as '%s' via Gemini fallback", item.id, category
+                )
             except Exception as exc:
                 logger.error("Gemini classify fallback also failed for item=%s: %s", item.id, exc)
 
@@ -167,7 +170,11 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
         session.add(audit)
 
         await session.commit()
-        return {"feedback_item_id": feedback_item_id, "tenant_id": tenant_id, "status": "classified"}
+        return {
+            "feedback_item_id": feedback_item_id,
+            "tenant_id": tenant_id,
+            "status": "classified",
+        }
 
 
 @shared_task(bind=True, max_retries=3)
@@ -191,13 +198,45 @@ async def _analyze_sentiment_async(feedback_item_id: str, tenant_id: str) -> dic
             )
         )
         item = result.scalar_one_or_none()
-        if not item or not item.body:
+        if not item:
+            return {"error": "Feedback not found or empty"}
+        text_for_sentiment = " ".join(filter(None, [item.title, item.body]))
+        if not text_for_sentiment:
             return {"error": "Feedback not found or empty"}
 
-        # VADER is fast, local, and well-suited for short developer feedback
-        analyzer = SentimentIntensityAnalyzer()
-        vs = analyzer.polarity_scores(item.body)
-        sentiment = round(vs["compound"], 4)
+        sentiment = None
+
+        # Primary: NVIDIA NIM — handles any language
+        if settings.nvidia_api_key:
+            try:
+                client = _get_nvidia_client()
+                prompt = (
+                    "Analyze the sentiment of the following developer feedback. "
+                    "Reply with ONLY a single decimal number between -1.0 (very negative) "
+                    "and 1.0 (very positive), for example: -0.72 or 0.45\n\n"
+                    f"Feedback: {text_for_sentiment}"
+                )
+                resp = client.chat.completions.create(
+                    model=NVIDIA_CLASSIFY_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=8,
+                )
+                raw = resp.choices[0].message.content.strip()
+                numeric = "".join(c for c in raw if c.isdigit() or c in ".-")
+                score = float(numeric)
+                if -1.0 <= score <= 1.0:
+                    sentiment = round(score, 4)
+                    logger.info("Sentiment %.4f for item=%s via NVIDIA NIM", sentiment, item.id)
+            except Exception as exc:
+                logger.warning("NVIDIA sentiment failed for item=%s: %s — falling back", item.id, exc)
+
+        # Fallback: VADER (English only)
+        if sentiment is None:
+            analyzer = SentimentIntensityAnalyzer()
+            vs = analyzer.polarity_scores(text_for_sentiment)
+            sentiment = round(vs["compound"], 4)
+            logger.info("Sentiment %.4f for item=%s via VADER", sentiment, item.id)
 
         if sentiment < -0.6:
             logger.warning(

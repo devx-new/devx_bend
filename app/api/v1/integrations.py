@@ -320,7 +320,7 @@ async def oauth_callback_browser(
     """
     if provider not in _CATALOG or _CATALOG[provider]["coming_soon"]:
         return RedirectResponse(
-            url=f"{settings.allowed_origins}/integrations?error=unsupported_provider"
+            url=f"{settings.frontend_url}/integrations?error=unsupported_provider"
         )
 
     # Resolve tenant from Redis state
@@ -334,19 +334,19 @@ async def oauth_callback_browser(
 
     if not tenant_id:
         return RedirectResponse(
-            url=f"{settings.allowed_origins}/integrations?error=invalid_state"
+            url=f"{settings.frontend_url}/integrations?error=invalid_state"
         )
 
     try:
         credentials = await _exchange_oauth_code(provider, code)
     except ValueError:
         return RedirectResponse(
-            url=f"{settings.allowed_origins}/integrations?error=oauth_failed&provider={provider}"
+            url=f"{settings.frontend_url}/integrations?error=oauth_failed&provider={provider}"
         )
 
     await _upsert_integration(db, tenant_id, provider, credentials)
     return RedirectResponse(
-        url=f"{settings.allowed_origins}/integrations?connected={provider}"
+        url=f"{settings.frontend_url}/integrations?connected={provider}"
     )
 
 
@@ -537,6 +537,56 @@ async def configure_integration(
         repos = selections.get("repos", [])
         meta["active_repos"] = len(repos)
         meta["repo_names"] = repos
+
+        # Generate a webhook secret once and register hooks on every configured repo
+        webhook_secret = integration.webhook_secret or secrets.token_hex(32)
+        integration.webhook_secret = webhook_secret
+
+        access_token = (integration.credentials or {}).get("access_token")
+        backend_root = (
+            settings.backend_url
+            or settings.allowed_origins
+            or "http://localhost:8000"
+        )
+        hook_url = f"{backend_root}/v1/webhooks/github/{current_user.tenant_id}"
+
+        if access_token:
+            async with httpx.AsyncClient() as client:
+                headers = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/vnd.github+json",
+                }
+                for repo in repos:
+                    # Fetch existing hooks and skip if ours is already there
+                    existing_resp = await client.get(
+                        f"https://api.github.com/repos/{repo}/hooks",
+                        headers=headers,
+                        params={"per_page": 100},
+                        timeout=10.0,
+                    )
+                    already_registered = any(
+                        h.get("config", {}).get("url") == hook_url
+                        for h in (existing_resp.json() if existing_resp.status_code == 200 else [])
+                    )
+                    if not already_registered:
+                        await client.post(
+                            f"https://api.github.com/repos/{repo}/hooks",
+                            headers=headers,
+                            json={
+                                "name": "web",
+                                "active": True,
+                                "events": ["issues"],
+                                "config": {
+                                    "url": hook_url,
+                                    "content_type": "json",
+                                    "secret": webhook_secret,
+                                },
+                            },
+                            timeout=10.0,
+                        )
+
+        meta["webhook_url"] = hook_url
+
     elif provider == "linear":
         teams = selections.get("teams", [])
         meta["mapped_teams"] = len(teams)

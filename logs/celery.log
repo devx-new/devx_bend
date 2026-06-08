@@ -25,3 +25,59 @@
   . app.agents.routing.route_feedback
   . app.worker.orchestrator.start_feedback_pipeline
 
+ 
+ -------------- celery@haroffcode-Swift-SF314-512T v5.6.3 (recovery)
+--- ***** ----- 
+-- ******* ---- Linux-6.17.0-35-generic-x86_64-with-glibc2.39 2026-06-08 09:09:11
+- *** --- * --- 
+- ** ---------- [config]
+- ** ---------- .> app:         dfp_worker:0x7ba6a0abfa10
+- ** ---------- .> transport:   redis://localhost:6379/0
+- ** ---------- .> results:     redis://localhost:6379/0
+- *** --- * --- .> concurrency: 16 (prefork)
+-- ******* ---- .> task events: OFF (enable -E to monitor tasks in this worker)
+--- ***** ----- 
+ -------------- [queues]
+                .> celery           exchange=celery(direct) key=celery
+                
+
+[tasks]
+  . app.agents.ai_processing.analyze_sentiment
+  . app.agents.ai_processing.classify_feedback
+  . app.agents.ai_processing.embed_feedback
+  . app.agents.deduplication.dedup_feedback
+  . app.agents.digest.generate_weekly_digest
+  . app.agents.ingestion.normalize_feedback
+  . app.agents.prioritization.calculate_priority
+  . app.agents.routing.route_feedback
+  . app.worker.orchestrator.start_feedback_pipeline
+
+[2026-06-08 09:09:12,924: INFO/MainProcess] Connected to redis://localhost:6379/0
+[2026-06-08 09:09:12,929: INFO/MainProcess] mingle: searching for neighbors
+[2026-06-08 09:09:13,943: INFO/MainProcess] mingle: all alone
+[2026-06-08 09:09:13,961: INFO/MainProcess] celery@haroffcode-Swift-SF314-512T ready.
+[2026-06-08 09:23:00,461: INFO/MainProcess] Task app.worker.orchestrator.start_feedback_pipeline[90fe87ff-dbdd-44aa-a4ea-23c00d47fa9b] received
+[2026-06-08 09:23:00,479: INFO/MainProcess] Task app.agents.ingestion.normalize_feedback[e6c8aeff-0909-4c65-94ab-086c5fa260f9] received
+[2026-06-08 09:23:00,479: INFO/ForkPoolWorker-16] Task app.worker.orchestrator.start_feedback_pipeline[90fe87ff-dbdd-44aa-a4ea-23c00d47fa9b] succeeded in 0.016023615999074536s: {'status': 'pipeline_started', 'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9'}
+[2026-06-08 09:23:00,603: INFO/MainProcess] Task app.agents.ai_processing.embed_feedback[d90f1771-c73e-4849-924b-9f5d1f2aadd6] received
+[2026-06-08 09:23:00,603: INFO/ForkPoolWorker-1] Task app.agents.ingestion.normalize_feedback[e6c8aeff-0909-4c65-94ab-086c5fa260f9] succeeded in 0.12287772600029712s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'normalized'}
+[2026-06-08 09:23:00,959: ERROR/ForkPoolWorker-16] Embed failed for item=8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9: [Errno -5] No address associated with hostname
+[2026-06-08 09:23:00,966: INFO/ForkPoolWorker-16] Task app.agents.ai_processing.embed_feedback[d90f1771-c73e-4849-924b-9f5d1f2aadd6] succeeded in 0.361549487000957s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'embedded'}
+[2026-06-08 09:23:00,966: INFO/MainProcess] Task app.agents.deduplication.dedup_feedback[0b13cf21-44a4-4a99-ae80-bd3c4e837862] received
+[2026-06-08 09:23:01,038: INFO/MainProcess] Task app.agents.ai_processing.classify_feedback[c287ce73-11c9-4e63-a5fc-bfb49c6e8d24] received
+[2026-06-08 09:23:01,039: INFO/ForkPoolWorker-16] Task app.agents.deduplication.dedup_feedback[0b13cf21-44a4-4a99-ae80-bd3c4e837862] succeeded in 0.07202627600054257s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'dedup_skipped'}
+[2026-06-08 09:23:02,647: INFO/ForkPoolWorker-1] HTTP Request: POST https://integrate.api.nvidia.com/v1/chat/completions "HTTP/1.1 200 OK"
+[2026-06-08 09:23:02,659: INFO/ForkPoolWorker-1] Classified item=8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9 as 'docs' via NVIDIA NIM
+[2026-06-08 09:23:02,673: INFO/MainProcess] Task app.agents.ai_processing.analyze_sentiment[180afa0c-4229-4e42-a308-c3d33dfa5107] received
+[2026-06-08 09:23:02,673: INFO/ForkPoolWorker-1] Task app.agents.ai_processing.classify_feedback[c287ce73-11c9-4e63-a5fc-bfb49c6e8d24] succeeded in 1.633898809001039s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'classified'}
+[2026-06-08 09:23:02,755: INFO/MainProcess] Task app.agents.prioritization.calculate_priority[d98fed13-a412-4c51-b058-8bc163b2013b] received
+[2026-06-08 09:23:02,755: INFO/ForkPoolWorker-16] Task app.agents.ai_processing.analyze_sentiment[180afa0c-4229-4e42-a308-c3d33dfa5107] succeeded in 0.08146894800120208s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'sentiment_analyzed'}
+[2026-06-08 09:23:03,672: INFO/ForkPoolWorker-1] HTTP Request: POST https://integrate.api.nvidia.com/v1/chat/completions "HTTP/1.1 200 OK"
+[2026-06-08 09:23:03,673: INFO/ForkPoolWorker-1] Priority score=40.0 for item=8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9 via NVIDIA NIM
+[2026-06-08 09:23:03,702: INFO/MainProcess] Task app.agents.routing.route_feedback[9c3ae6b1-4c23-4d70-a36c-f9dac84caa7b] received
+[2026-06-08 09:23:03,703: INFO/ForkPoolWorker-1] Task app.agents.prioritization.calculate_priority[d98fed13-a412-4c51-b058-8bc163b2013b] succeeded in 0.947273446001418s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'prioritized'}
+[2026-06-08 09:23:04,404: INFO/ForkPoolWorker-16] HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/issue/createmeta/KAN/issuetypes "HTTP/1.1 401 Unauthorized"
+[2026-06-08 09:23:04,404: INFO/ForkPoolWorker-16] Jira project=KAN available types=[] chosen=Task
+[2026-06-08 09:23:04,618: INFO/ForkPoolWorker-16] HTTP Request: POST https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/issue "HTTP/1.1 401 Unauthorized"
+[2026-06-08 09:23:04,619: ERROR/ForkPoolWorker-16] Failed to create Jira issue for item=8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9: Jira API error 401: {'code': 401, 'message': 'Unauthorized'}
+[2026-06-08 09:23:04,622: INFO/ForkPoolWorker-16] Task app.agents.routing.route_feedback[9c3ae6b1-4c23-4d70-a36c-f9dac84caa7b] succeeded in 0.9181044790002488s: {'feedback_item_id': '8c4d56aa-c457-4c0f-a9e2-f6beffe62fe9', 'tenant_id': 'f036b466-8c21-4209-8f5d-888210c118ec', 'status': 'routed'}

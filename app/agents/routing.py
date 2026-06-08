@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 import logging
+import re
 from celery import shared_task
 from sqlalchemy import select
 
@@ -21,6 +22,16 @@ async def _route_to_slack(item: FeedbackItem, integration: Integration, session)
     bot_token = creds.get("bot_token") or creds.get("access_token")
 
     if not webhook_url and not bot_token:
+        return False
+
+    # Only notify Slack for high-priority or critical-sentiment items to avoid noise
+    priority = item.priority_score or 0
+    sentiment = item.sentiment_score or 0
+    if priority < 60 and sentiment > -0.6:
+        logger.debug(
+            "Skipping Slack for item=%s: priority=%.1f sentiment=%.2f below threshold",
+            item.id, priority, sentiment,
+        )
         return False
 
     emoji = "🚨" if (item.priority_score and item.priority_score > 80) else "💬"
@@ -75,9 +86,9 @@ async def _route_to_slack(item: FeedbackItem, integration: Integration, session)
 
 
 async def _route_to_github(item: FeedbackItem, integration: Integration, session) -> bool:
-    if not item.priority_score or item.priority_score < 60:
+    if item.category not in ("bug", "feature", "performance", "security"):
         return False
-    if item.category not in ("bug", "feature"):
+    if item.priority_score is None:
         return False
 
     creds = integration.credentials or {}
@@ -96,11 +107,12 @@ async def _route_to_github(item: FeedbackItem, integration: Integration, session
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/vnd.github+json",
     }
+    sentiment_str = f"{item.sentiment_score:.2f}" if item.sentiment_score is not None else "N/A"
     payload = {
         "title": f"[{item.category.upper()}] {item.title}",
         "body": (
             f"**Priority:** {item.priority_score:.1f}/100\n"
-            f"**Sentiment:** {item.sentiment_score:.2f}\n\n"
+            f"**Sentiment:** {sentiment_str}\n\n"
             f"{item.body}"
         ),
         "labels": [item.category, "dfp-automated"],
@@ -156,6 +168,18 @@ def _pick_issue_type(category: str | None, available: list[str]) -> str:
     return available[0] if available else "Task"
 
 
+_DFP_META_PREFIX = re.compile(
+    r"^\s*\*\*Priority:\*\*[^\n]*\n\*\*Sentiment:\*\*[^\n]*\n+",
+    re.IGNORECASE,
+)
+
+def _clean_body(text: str | None) -> str:
+    """Strip the Priority/Sentiment header our pipeline injects into GitHub issue bodies."""
+    if not text:
+        return ""
+    return _DFP_META_PREFIX.sub("", text).strip()
+
+
 async def _route_to_jira(item: FeedbackItem, integration: Integration, session) -> bool:
     creds = integration.credentials or {}
     config = integration.config or {}
@@ -172,7 +196,7 @@ async def _route_to_jira(item: FeedbackItem, integration: Integration, session) 
         "high-priority" if (item.priority_score and item.priority_score > 70) else "normal-priority"
     )
 
-    description_text = item.body or item.title or ""
+    description_text = _clean_body(item.body) or item.title or ""
     adf_description = {
         "type": "doc",
         "version": 1,
@@ -246,8 +270,12 @@ async def _route_to_jira(item: FeedbackItem, integration: Integration, session) 
                 data = resp.json()
                 if resp.status_code not in (200, 201):
                     raise ValueError(f"Jira API error {resp.status_code}: {data}")
-                created_keys.append(data.get("key"))
-                logger.info("Created Jira issue %s for feedback=%s", data.get("key"), item.id)
+                jira_key = data.get("key")
+                created_keys.append(jira_key)
+                logger.info("Created Jira issue %s for feedback=%s", jira_key, item.id)
+                # Store first key so the Jira webhook can look this item back up
+                if jira_key and not item.jira_issue_key:
+                    item.jira_issue_key = jira_key
 
         audit = AuditLog(
             tenant_id=item.tenant_id,
@@ -289,10 +317,9 @@ async def _route_feedback_async(feedback_item_id: str, tenant_id: str) -> dict:
             if integration.provider == item.source:
                 # Never echo feedback back to the provider it came from
                 continue
-            if integration.provider == "slack":
-                await _route_to_slack(item, integration, session)
-            elif integration.provider == "github":
-                await _route_to_github(item, integration, session)
+            if integration.provider in ("slack", "github"):
+                # Slack and GitHub are inbound-only; outbound routing is disabled
+                continue
             elif integration.provider == "jira":
                 await _route_to_jira(item, integration, session)
 
