@@ -19,7 +19,7 @@ from app.schemas.integration import (
     IntegrationResponse,
     ProviderCatalogItem,
 )
-from app.schemas.routing import RoutingRuleCreate, RoutingRuleResponse
+from app.schemas.routing import RoutingRuleCreate, RoutingRuleUpdate, RoutingRuleResponse
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -672,6 +672,8 @@ async def create_routing_rule(
     tenant_id = current_user.tenant_id
     rule = RoutingRule(
         tenant_id=tenant_id,
+        name=body.name,
+        enabled=body.enabled,
         condition=body.condition,
         action_type=body.action_type,
         action_config=body.action_config,
@@ -688,9 +690,59 @@ async def list_routing_rules(
     current_user: User = Depends(get_current_user),
 ):
     tenant_id = current_user.tenant_id
-    result = await db.execute(select(RoutingRule).where(RoutingRule.tenant_id == tenant_id))
+    result = await db.execute(
+        select(RoutingRule)
+        .where(RoutingRule.tenant_id == tenant_id)
+        .order_by(RoutingRule.created_at)
+    )
     items = result.scalars().all()
     return {
         "success": True,
         "message": [RoutingRuleResponse.model_validate(i).model_dump() for i in items],
     }
+
+
+@router.patch("/routing-rules/{rule_id}", response_model=RoutingRuleResponse)
+async def update_routing_rule(
+    rule_id: str,
+    body: RoutingRuleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(RoutingRule).where(
+            RoutingRule.id == rule_id,
+            RoutingRule.tenant_id == current_user.tenant_id,
+        )
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Routing rule not found")
+
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(rule, field, value)
+
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+@router.delete("/routing-rules/{rule_id}")
+async def delete_routing_rule(
+    rule_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(RoutingRule).where(
+            RoutingRule.id == rule_id,
+            RoutingRule.tenant_id == current_user.tenant_id,
+        )
+    )
+    rule = result.scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Routing rule not found")
+
+    await db.delete(rule)
+    await db.commit()
+    return {"success": True}

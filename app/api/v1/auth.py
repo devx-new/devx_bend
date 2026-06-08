@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_user
 from app.core.cookies import clear_auth_cookies, set_auth_cookies
 from app.core.rate_limit import get_redis
 from app.database import get_db
@@ -193,6 +194,77 @@ async def logout(request: Request, response: Response):
 @router.get("/oauth/github/url")
 async def github_oauth_url():
     return {"url": get_github_oauth_url()}
+
+
+@router.get("/me")
+async def get_me(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return the current user's profile."""
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    return {
+        "success": True,
+        "data": {
+            "user_id": current_user.id,
+            "email": current_user.email,
+            "role": current_user.role,
+            "tenant_id": current_user.tenant_id,
+            "tenant_name": tenant.name if tenant else None,
+            "tenant_slug": tenant.slug if tenant else None,
+            "avatar_url": current_user.avatar_url,
+            "oauth_provider": current_user.oauth_provider,
+            "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        },
+    }
+
+
+@router.post("/change-password")
+async def change_password(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Change the current user's password."""
+    current_pw = body.get("current_password", "")
+    new_pw = body.get("new_password", "")
+
+    if not new_pw or len(new_pw) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+
+    if current_user.password_hash:
+        if not verify_password(current_pw, current_user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    current_user.password_hash = hash_password(new_pw)
+    await db.commit()
+    return {"success": True, "message": "Password updated"}
+
+
+@router.patch("/me")
+async def update_profile(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update mutable profile fields (email)."""
+    if "email" in body:
+        new_email = body["email"].strip().lower()
+        existing = (await db.execute(select(User).where(User.email == new_email))).scalar_one_or_none()
+        if existing and existing.id != current_user.id:
+            raise HTTPException(status_code=400, detail="Email already in use")
+        current_user.email = new_email
+
+    if "tenant_name" in body:
+        tenant_result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+        tenant = tenant_result.scalar_one_or_none()
+        if tenant:
+            tenant.name = body["tenant_name"].strip()
+
+    await db.commit()
+    return {"success": True, "message": "Profile updated"}
 
 
 @router.post("/oauth/github", response_model=AuthSuccessResponse)
