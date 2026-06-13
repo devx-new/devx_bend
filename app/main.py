@@ -12,7 +12,7 @@ from app.core.tenant import TenantMiddleware
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     yield
 
@@ -26,7 +26,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.allowed_origins,
+        allow_origins=[o.strip() for o in settings.allowed_origins.split(",") if o.strip()],
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "X-CSRF-Token"],
