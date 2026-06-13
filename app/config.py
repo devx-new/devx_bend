@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = int(os.getenv("refresh_token_expire_days", 7))
     bcrypt_cost: int = int(os.getenv("bcrypt_cost", 12))
     log_level: str = os.getenv("log_level")
-    log_file: str = os.getenv("log_file")
+    log_file: str = os.getenv("log_file", "")
     log_max_bytes: int = int(os.getenv("log_max_bytes", 104857600))
     log_backup_count: int = int(os.getenv("log_backup_count", 5))
     cloudinary_cloud_name: str = os.getenv("cloudinary_cloud_name")
@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     csrf_token_expire_minutes: int = int(os.getenv("csrf_token_expire_minutes", 60))
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("database_url")
+    @classmethod
+    def ensure_async_driver(cls, v: str) -> str:
+        # Railway (and some other providers) supply postgresql:// — rewrite to asyncpg scheme
+        if v.startswith("postgresql://") or v.startswith("postgres://"):
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+        return v
 
     @field_validator("secret_key")
     @classmethod
