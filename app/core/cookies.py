@@ -16,7 +16,8 @@ def _cookie_base() -> dict:
     return {"secure": secure, "samesite": samesite, "domain": None}
 
 
-def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> str:
+    """Set auth cookies and return the csrf token value for inclusion in the response body."""
     from app.config import settings
     base = _cookie_base()
 
@@ -47,6 +48,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str) 
         max_age=settings.csrf_token_expire_minutes * 60,
         **base,
     )
+    return csrf
 
 
 def clear_auth_cookies(response: Response) -> None:

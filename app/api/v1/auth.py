@@ -105,9 +105,9 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
     access_token = create_access_token({"sub": user.id, "tenant_id": tenant.id})
     refresh_token = create_refresh_token({"sub": user.id, "tenant_id": tenant.id})
 
-    set_auth_cookies(response, access_token, refresh_token)
+    csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": tenant.id})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": tenant.id, "csrf_token": csrf_token})
 
 
 
@@ -137,10 +137,9 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
     access_token = create_access_token({"sub": user.id, "tenant_id": user.tenant_id})
     refresh_token = create_refresh_token({"sub": user.id, "tenant_id": user.tenant_id})
 
-    set_auth_cookies(response, access_token, refresh_token)
+    csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    # Tokens are in cookies — response body contains only non-sensitive user info
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
 
 
 @router.post("/refresh", response_model=AuthSuccessResponse)
@@ -175,9 +174,9 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
     access_token = create_access_token({"sub": user.id, "tenant_id": user.tenant_id})
     new_refresh_token = create_refresh_token({"sub": user.id, "tenant_id": user.tenant_id})
 
-    set_auth_cookies(response, access_token, new_refresh_token)
+    csrf_token = set_auth_cookies(response, access_token, new_refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
 
 
 @router.post("/logout")
@@ -319,6 +318,6 @@ async def github_oauth_callback(
     access_token = create_access_token({"sub": user.id, "tenant_id": user.tenant_id})
     refresh_token = create_refresh_token({"sub": user.id, "tenant_id": user.tenant_id})
 
-    set_auth_cookies(response, access_token, refresh_token)
+    csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
