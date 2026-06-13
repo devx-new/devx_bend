@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     jira_client_id: str = os.getenv("jira_client_id", "")
     jira_client_secret: str = os.getenv("jira_client_secret", "")
     jira_redirect_uri: str = os.getenv("jira_redirect_uri", "")
-    allowed_origins: str = os.getenv("allowed_origins")
+    allowed_origins: list[str] = []
     frontend_url: str = os.getenv("frontend_url", "http://localhost:5173")
     backend_url: str = os.getenv("backend_url", "")
     cookie_secure: bool = os.getenv("cookie_secure", "False").lower() in ("true", "1")
@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     csrf_token_expire_minutes: int = int(os.getenv("csrf_token_expire_minutes", 60))
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v  # type: ignore[return-value]
 
     @field_validator("database_url")
     @classmethod
