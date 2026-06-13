@@ -29,6 +29,11 @@ class ForbiddenException(AppException):
         super().__init__(code="FORBIDDEN", message=message, status_code=403)
 
 
+class ConflictException(AppException):
+    def __init__(self, message: str = "Resource already exists"):
+        super().__init__(code="CONFLICT", message=message, status_code=409)
+
+
 class RateLimitException(AppException):
     def __init__(self, message: str = "Rate limit exceeded"):
         super().__init__(code="RATE_LIMIT", message=message, status_code=429)

@@ -6,10 +6,12 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.cookies import clear_auth_cookies, set_auth_cookies
+from app.core.errors import ConflictException
 from app.core.rate_limit import get_redis
 from app.database import get_db
 from app.models.tenant import Tenant
@@ -38,7 +40,7 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
     # 1. Check if user already exists
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="User with this email already exists")
+        raise ConflictException("An account with this email already exists")
 
     # 2. Slug generation
     base_slug = re.sub(r'[^a-z0-9]+', '-', body.organization_name.lower()).strip('-')
@@ -93,7 +95,11 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
     db.add_all([audit_tenant, audit_user])
 
     # 6. Commit transaction
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictException("An account with this email already exists")
 
     # 7. Generate tokens and set cookies
     access_token = create_access_token({"sub": user.id, "tenant_id": tenant.id})
