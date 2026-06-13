@@ -2,9 +2,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
 from starlette.responses import Response
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send, Message
 
 from app.api.v1.router import router as v1_router
 from app.core.errors import exception_handlers
@@ -15,25 +15,45 @@ _CORS_ALLOW_HEADERS = "Authorization, Content-Type, X-Tenant-ID, X-CSRF-Token"
 _CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
 
 
-class PermissiveCORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        origin = request.headers.get("origin", "")
+class PermissiveCORSMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        if request.method == "OPTIONS":
-            response = Response(status_code=200)
-            if origin:
-                response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            response.headers["Access-Control-Allow-Methods"] = _CORS_ALLOW_METHODS
-            response.headers["Access-Control-Allow-Headers"] = _CORS_ALLOW_HEADERS
-            response.headers["Access-Control-Max-Age"] = "600"
-            return response
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        response = await call_next(request)
-        if origin:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-        return response
+        origin = Headers(scope=scope).get("origin", "")
+
+        if not origin:
+            await self.app(scope, receive, send)
+            return
+
+        if scope["method"] == "OPTIONS":
+            request_headers = Headers(scope=scope)
+            requested = request_headers.get("access-control-request-headers", _CORS_ALLOW_HEADERS)
+            response = Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": _CORS_ALLOW_METHODS,
+                    "Access-Control-Allow-Headers": requested,
+                    "Access-Control-Max-Age": "600",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        async def send_with_cors(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.append("Access-Control-Allow-Origin", origin)
+                headers.append("Access-Control-Allow-Credentials", "true")
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
 
 
 @asynccontextmanager
