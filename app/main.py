@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router as v1_router
-from app.config import settings
 from app.core.errors import exception_handlers
 from app.core.logging import setup_logging
 from app.core.tenant import TenantMiddleware
@@ -26,7 +25,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[o.strip() for o in settings.allowed_origins.split(",") if o.strip()],
+        allow_origin_regex=".*",
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "X-CSRF-Token"],
