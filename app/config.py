@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = os.getenv("cookie_secure", "False").lower() in ("true", "1")
     cookie_samesite: str = os.getenv("cookie_samesite", "lax")
     csrf_token_expire_minutes: int = int(os.getenv("csrf_token_expire_minutes", 60))
+    super_admin_secret: str = os.getenv("SUPER_ADMIN_SECRET", "")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
