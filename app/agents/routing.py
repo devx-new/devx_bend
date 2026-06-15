@@ -5,6 +5,7 @@ import re
 from celery import shared_task
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import async_session_factory, run_in_celery
 from app.models.feedback import FeedbackItem
 from app.models.integration import Integration
@@ -272,6 +273,59 @@ async def _route_to_jira(item: FeedbackItem, integration: Integration, session, 
         return False
 
 
+async def _route_to_discord(item: FeedbackItem, integration: Integration, session, channel_override: str | None = None) -> bool:
+    creds = integration.credentials or {}
+    config = integration.config or {}
+
+    webhook_url = creds.get("webhook_url")
+    bot_token = settings.discord_bot_token
+
+    if not webhook_url and not bot_token:
+        return False
+
+    color = 0xFF4444 if (item.priority_score and item.priority_score > 80) else 0x5865F2
+    embed = {
+        "title": item.title,
+        "color": color,
+        "fields": [
+            {"name": "Category", "value": item.category or "uncategorized", "inline": True},
+            {"name": "Priority", "value": f"{item.priority_score:.1f}/100", "inline": True},
+            {"name": "Sentiment", "value": f"{item.sentiment_score:.2f}", "inline": True},
+            {"name": "Content", "value": (item.body or "")[:1024], "inline": False},
+        ],
+    }
+
+    try:
+        with httpx.Client() as client:
+            if webhook_url:
+                resp = client.post(webhook_url, json={"embeds": [embed]}, timeout=10.0)
+                resp.raise_for_status()
+            else:
+                channel_ids = ([channel_override] if channel_override else None) or config.get("channel_ids", [])
+                if not channel_ids:
+                    return False
+                for channel_id in channel_ids:
+                    resp = client.post(
+                        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                        headers={"Authorization": f"Bot {bot_token}"},
+                        json={"embeds": [embed]},
+                        timeout=10.0,
+                    )
+                    resp.raise_for_status()
+
+        audit = AuditLog(
+            tenant_id=item.tenant_id, actor_id="system", action="NOTIFY_DISCORD",
+            resource_type="feedback_item", resource_id=item.id,
+            diff={"after": {"status": "success", "channel": channel_override}},
+            ip="127.0.0.1",
+        )
+        session.add(audit)
+        return True
+    except Exception as e:
+        logger.error("Failed to route to Discord: %s", e)
+        return False
+
+
 async def _route_to_linear(item: FeedbackItem, integration: Integration, session, team_id_override: str | None = None) -> bool:
     creds = integration.credentials or {}
     config = integration.config or {}
@@ -377,6 +431,13 @@ async def _execute_rule(item: FeedbackItem, rule: RoutingRule, integrations_by_p
             logger.warning("Rule %s: Linear not connected", rule.id)
             return False
         return await _route_to_linear(item, integration, session, team_id_override=action_config.get("team_id"))
+
+    elif action_type == "post_discord":
+        integration = integrations_by_provider.get("discord")
+        if not integration:
+            logger.warning("Rule %s: Discord not connected", rule.id)
+            return False
+        return await _route_to_discord(item, integration, session, channel_override=action_config.get("channel_id"))
 
     logger.warning("Unknown action_type '%s' in rule %s", action_type, rule.id)
     return False

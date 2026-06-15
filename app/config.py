@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     jira_client_id: str = os.getenv("jira_client_id", "")
     jira_client_secret: str = os.getenv("jira_client_secret", "")
     jira_redirect_uri: str = os.getenv("jira_redirect_uri", "")
+    discord_client_id: str = os.getenv("discord_client_id", "")
+    discord_client_secret: str = os.getenv("discord_client_secret", "")
+    discord_redirect_uri: str = os.getenv("discord_redirect_uri", "")
+    discord_public_key: str = os.getenv("discord_public_key", "")
+    discord_bot_token: str = os.getenv("discord_bot_token", "")
     allowed_origins: str = ""
     frontend_url: str = os.getenv("frontend_url", "http://localhost:5173")
     backend_url: str = os.getenv("backend_url", "")

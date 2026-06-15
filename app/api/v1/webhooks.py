@@ -4,6 +4,8 @@ import json
 import time
 from datetime import datetime, timezone
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -308,6 +310,96 @@ async def jira_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession
             await db.commit()
 
     return {"success": True, "message": {"received": True}}
+
+
+# ── Discord Interactions ──────────────────────────────────────────────────────
+
+def _verify_discord_signature(public_key_hex: str, timestamp: str, body: bytes, signature_hex: str) -> bool:
+    try:
+        key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+        key.verify(bytes.fromhex(signature_hex), timestamp.encode() + body)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+@router.post("/discord")
+async def discord_interactions(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Discord Interactions endpoint.
+    Set this URL as the Interactions Endpoint URL in your Discord app settings.
+    Handles the PING verification challenge and APPLICATION_COMMAND interactions.
+
+    Slash command /report title:<text> description:<text> creates a FeedbackItem.
+    """
+    body = await _read_body(request)
+    timestamp = request.headers.get("X-Signature-Timestamp", "")
+    signature = request.headers.get("X-Signature-Ed25519", "")
+
+    if settings.discord_public_key and not _verify_discord_signature(
+        settings.discord_public_key, timestamp, body, signature
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Discord signature")
+
+    payload = json.loads(body)
+    interaction_type = payload.get("type")
+
+    # Discord requires this to verify the endpoint during setup
+    if interaction_type == 1:
+        return {"type": 1}
+
+    # APPLICATION_COMMAND — a slash command invocation
+    if interaction_type == 2:
+        data = payload.get("data", {})
+        options = {o["name"]: o["value"] for o in data.get("options", [])}
+
+        user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
+        username = user.get("username", "unknown")
+        guild_id = payload.get("guild_id", "")
+
+        title = options.get("title") or data.get("name", "Discord Feedback")
+        body_text = options.get("description") or options.get("body") or title
+
+        result = await db.execute(
+            select(Integration).where(
+                Integration.provider == "discord",
+                Integration.status == "active",
+            )
+        )
+        integration = None
+        for row in result.scalars().all():
+            if (row.credentials or {}).get("guild_id") == guild_id:
+                integration = row
+                break
+
+        if not integration:
+            return {"type": 4, "data": {"content": "This server is not connected to DevX."}}
+
+        external_id = f"discord-{guild_id}-{payload.get('id', '')}"
+        existing = await db.scalar(
+            select(FeedbackItem).where(
+                FeedbackItem.tenant_id == integration.tenant_id,
+                FeedbackItem.source == "discord",
+                FeedbackItem.external_id == external_id,
+            )
+        )
+        if not existing:
+            item = FeedbackItem(
+                tenant_id=integration.tenant_id,
+                source="discord",
+                external_id=external_id,
+                title=title[:200],
+                body=body_text,
+                author_handle=username,
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            start_feedback_pipeline.delay(item.id, integration.tenant_id)
+
+        return {"type": 4, "data": {"content": "Thanks for your feedback! We'll review it shortly."}}
+
+    return {"type": 1}
 
 
 # ── Slack Events API ──────────────────────────────────────────────────────────

@@ -179,6 +179,18 @@ async def get_oauth_url(
             f"&response_type=code"
             f"&prompt=consent"
         )
+    elif provider == "discord":
+        if not settings.discord_client_id:
+            raise HTTPException(status_code=503, detail="Discord OAuth not configured")
+        url = (
+            f"https://discord.com/api/oauth2/authorize"
+            f"?client_id={settings.discord_client_id}"
+            f"&redirect_uri={settings.discord_redirect_uri}"
+            f"&response_type=code"
+            f"&scope=bot%20applications.commands"
+            f"&permissions=2048"
+            f"&state={state}"
+        )
     else:
         raise HTTPException(status_code=400, detail=f"OAuth not implemented for '{provider}'")
 
@@ -274,6 +286,28 @@ async def _exchange_oauth_code(provider: str, code: str) -> dict:
                 "refresh_token": data.get("refresh_token"),
                 "cloud_id": cloud_id,
                 "cloud_url": cloud_url,
+            }
+
+        elif provider == "discord":
+            resp = await client.post(
+                "https://discord.com/api/oauth2/token",
+                data={
+                    "client_id": settings.discord_client_id,
+                    "client_secret": settings.discord_client_secret,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": settings.discord_redirect_uri,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"Discord token exchange failed: {data}")
+            guild = data.get("guild", {})
+            return {
+                "access_token": data["access_token"],
+                "guild_id": guild.get("id", ""),
+                "guild_name": guild.get("name", ""),
             }
 
         else:
@@ -508,6 +542,38 @@ async def list_jira_projects(
     return {"success": True, "data": projects}
 
 
+@router.get("/discord/channels")
+async def list_discord_channels(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List text channels in the connected Discord guild."""
+    integration = await _get_integration(db, current_user.tenant_id, "discord")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="Discord not connected")
+
+    guild_id = integration.credentials.get("guild_id")
+    bot_token = settings.discord_bot_token
+    if not guild_id or not bot_token:
+        raise HTTPException(status_code=400, detail="Discord guild or bot token not configured")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+            headers={"Authorization": f"Bot {bot_token}"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Failed to fetch Discord channels")
+
+    # type 0 = GUILD_TEXT
+    channels = [
+        {"id": c["id"], "name": c["name"]}
+        for c in resp.json()
+        if c.get("type") == 0
+    ]
+    return {"success": True, "data": channels}
+
+
 # ---------------------------------------------------------------------------
 # Step 3: save configuration (repos/teams/channels + routing rules)
 # ---------------------------------------------------------------------------
@@ -599,6 +665,16 @@ async def configure_integration(
         projects = selections.get("projects", [])
         meta["project_keys"] = [p.get("key") if isinstance(p, dict) else p for p in projects]
         meta["active_projects"] = len(projects)
+    elif provider == "discord":
+        channels = selections.get("channels", [])
+        meta["channel_ids"] = [c.get("id") if isinstance(c, dict) else c for c in channels]
+        meta["active_channels"] = len(channels)
+        # Allow users to provide an Incoming Webhook URL as an alternative to bot-token routing
+        webhook_url = selections.get("webhook_url")
+        if webhook_url:
+            creds = dict(integration.credentials or {})
+            creds["webhook_url"] = webhook_url
+            integration.credentials = creds
 
     integration.config = meta
 

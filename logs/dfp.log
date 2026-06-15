@@ -93,3 +93,5 @@ HTTP Request: GET https://api.github.com/repos/ChataPay/DevX-Backend/hooks?per_p
 HTTP Request: GET https://api.github.com/repos/Horlawhumy-dev/pitchroom_fend/hooks?per_page=100 "HTTP/1.1 200 OK"
 HTTP Request: GET https://api.github.com/repos/Horlawhumy-dev/pitchroom_bend/hooks?per_page=100 "HTTP/1.1 200 OK"
 HTTP Request: GET https://slack.com/api/conversations.list?limit=200&exclude_archived=true "HTTP/1.1 200 OK"
+HTTP Request: POST https://discord.com/api/oauth2/token "HTTP/1.1 200 OK"
+HTTP Request: GET https://discord.com/api/v10/guilds/1516041807228702850/channels "HTTP/1.1 200 OK"
