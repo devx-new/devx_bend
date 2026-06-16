@@ -312,6 +312,67 @@ async def jira_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession
     return {"success": True, "message": {"received": True}}
 
 
+# ── ClickUp Webhooks ─────────────────────────────────────────────────────────
+
+_CLICKUP_RESOLVED_STATUSES = {"complete", "closed", "cancelled", "canceled", "done"}
+
+
+@router.post("/clickup/{tenant_id}")
+async def clickup_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Per-tenant ClickUp webhook.  Register this URL in ClickUp → Settings → Integrations → Webhooks.
+    Handles taskStatusUpdated: when a ClickUp task is marked complete/closed, the linked
+    DevX feedback item is resolved.
+    """
+    result = await db.execute(
+        select(Integration).where(
+            Integration.tenant_id == tenant_id,
+            Integration.provider == "clickup",
+            Integration.status == "active",
+        )
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        raise HTTPException(status_code=400, detail="No active ClickUp integration for this tenant")
+
+    body = await _read_body(request)
+
+    # Verify signature only if a webhook secret is stored
+    webhook_secret = (integration.credentials or {}).get("webhook_secret")
+    if webhook_secret:
+        signature = request.headers.get("X-Signature", "")
+        expected = hmac.new(webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise HTTPException(status_code=401, detail="Invalid ClickUp webhook signature")
+
+    payload = json.loads(body)
+    event = payload.get("event", "")
+    task_id = payload.get("task_id", "")
+
+    if event == "taskStatusUpdated" and task_id:
+        new_status = ""
+        for hi in payload.get("history_items", []):
+            if hi.get("field") == "status":
+                after = hi.get("after", {})
+                new_status = (after.get("status") or after.get("type") or "").lower()
+                break
+
+        if new_status in _CLICKUP_RESOLVED_STATUSES:
+            feedback_item = await db.scalar(
+                select(FeedbackItem).where(
+                    FeedbackItem.tenant_id == tenant_id,
+                    FeedbackItem.clickup_task_id == task_id,
+                )
+            )
+            if feedback_item and feedback_item.status not in ("resolved", "wont_fix"):
+                devx_status = "wont_fix" if "cancel" in new_status else "resolved"
+                feedback_item.status = devx_status
+                feedback_item.resolved_at = datetime.now(timezone.utc)
+                await db.commit()
+
+    return {"success": True, "message": {"received": True}}
+
+
 # ── Discord Interactions ──────────────────────────────────────────────────────
 
 def _verify_discord_signature(public_key_hex: str, timestamp: str, body: bytes, signature_hex: str) -> bool:

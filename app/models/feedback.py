@@ -24,6 +24,7 @@ class FeedbackItem(Base):
     priority_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(384), nullable=True)
     jira_issue_key: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    clickup_task_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

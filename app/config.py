@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     discord_redirect_uri: str = os.getenv("discord_redirect_uri", "")
     discord_public_key: str = os.getenv("discord_public_key", "")
     discord_bot_token: str = os.getenv("discord_bot_token", "")
+    clickup_client_id: str = os.getenv("clickup_client_id", "")
+    clickup_client_secret: str = os.getenv("clickup_client_secret", "")
+    clickup_redirect_uri: str = os.getenv("clickup_redirect_uri", "")
     allowed_origins: str = ""
     frontend_url: str = os.getenv("frontend_url", "http://localhost:5173")
     backend_url: str = os.getenv("backend_url", "")

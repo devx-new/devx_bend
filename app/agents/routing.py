@@ -1,4 +1,3 @@
-import asyncio
 import httpx
 import logging
 import re
@@ -102,7 +101,7 @@ async def _route_to_slack(item: FeedbackItem, integration: Integration, session,
             tenant_id=item.tenant_id, actor_id="system", action="NOTIFY_SLACK",
             resource_type="feedback_item", resource_id=item.id,
             diff={"after": {"status": "success", "channel": channel_override}},
-            ip="127.0.0.1",
+            ip="",
         )
         session.add(audit)
         return True
@@ -326,6 +325,89 @@ async def _route_to_discord(item: FeedbackItem, integration: Integration, sessio
         return False
 
 
+async def _route_to_clickup(item: FeedbackItem, integration: Integration, session, list_id_override: str | None = None) -> bool:
+    creds = integration.credentials or {}
+    config = integration.config or {}
+    token = creds.get("access_token")
+    if not token:
+        return False
+
+    list_ids = ([list_id_override] if list_id_override else None) or config.get("list_ids", [])
+    if not list_ids:
+        logger.warning("ClickUp integration has no lists configured for tenant=%s", item.tenant_id)
+        return False
+
+    score = item.priority_score or 0
+    # ClickUp priority: 1=urgent, 2=high, 3=normal, 4=low
+    if score >= 80:
+        cu_priority = 1
+    elif score >= 60:
+        cu_priority = 2
+    elif score >= 30:
+        cu_priority = 3
+    else:
+        cu_priority = 4
+
+    if item.sentiment_score is not None:
+        s = item.sentiment_score
+        label = "Positive" if s >= 0.05 else ("Negative" if s <= -0.05 else "Neutral")
+        sentiment_str = f"{label} ({s:+.2f})"
+    else:
+        sentiment_str = "N/A"
+
+    priority_label = {1: "Urgent", 2: "High", 3: "Normal", 4: "Low"}.get(cu_priority, "Normal")
+    body_text = _clean_body(item.body) or ""
+
+    description = "\n".join([
+        f"Source:    {item.source}",
+        f"Priority:  {score:.0f} / 100  ({priority_label})",
+        f"Sentiment: {sentiment_str}",
+        f"Category:  {item.category or 'uncategorized'}",
+        "",
+        "─" * 40,
+        "",
+        body_text,
+    ])
+
+    created_ids = []
+    try:
+        with httpx.Client() as client:
+            headers = {"Authorization": token, "Content-Type": "application/json"}
+            for list_id in list_ids:
+                resp = client.post(
+                    f"https://api.clickup.com/api/v2/list/{list_id}/task",
+                    headers=headers,
+                    json={
+                        "name": item.title[:255],
+                        "description": description,
+                        "priority": cu_priority,
+                        "tags": [item.source or "dfp", item.category or "uncategorized"],
+                    },
+                    timeout=15.0,
+                )
+                data = resp.json()
+                if resp.status_code not in (200, 201):
+                    raise ValueError(f"ClickUp API error {resp.status_code}: {data}")
+                task_id = data.get("id")
+                if task_id:
+                    created_ids.append(task_id)
+
+        if created_ids and not item.clickup_task_id:
+            item.clickup_task_id = created_ids[0]
+
+        audit = AuditLog(
+            tenant_id=item.tenant_id, actor_id="system", action="CREATE_CLICKUP_TASK",
+            resource_type="feedback_item", resource_id=item.id,
+            diff={"after": {"clickup_task_ids": created_ids}},
+            ip="127.0.0.1",
+        )
+        session.add(audit)
+        return True
+    except Exception as e:
+        logger.error("Failed to create ClickUp task for item=%s: %s", item.id, e)
+        return False
+
+
 async def _route_to_linear(item: FeedbackItem, integration: Integration, session, team_id_override: str | None = None) -> bool:
     creds = integration.credentials or {}
     config = integration.config or {}
@@ -438,6 +520,13 @@ async def _execute_rule(item: FeedbackItem, rule: RoutingRule, integrations_by_p
             logger.warning("Rule %s: Discord not connected", rule.id)
             return False
         return await _route_to_discord(item, integration, session, channel_override=action_config.get("channel_id"))
+
+    elif action_type == "create_clickup_task":
+        integration = integrations_by_provider.get("clickup")
+        if not integration:
+            logger.warning("Rule %s: ClickUp not connected", rule.id)
+            return False
+        return await _route_to_clickup(item, integration, session, list_id_override=action_config.get("list_id"))
 
     logger.warning("Unknown action_type '%s' in rule %s", action_type, rule.id)
     return False

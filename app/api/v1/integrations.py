@@ -58,6 +58,12 @@ _CATALOG: dict[str, dict] = {
         "scopes": ["read:jira-work", "write:jira-work"],
         "coming_soon": False,
     },
+    "clickup": {
+        "name": "ClickUp",
+        "description": "Create ClickUp tasks automatically from high-priority feedback.",
+        "scopes": ["task:write", "team:read"],
+        "coming_soon": False,
+    },
 }
 
 # OAuth state TTL (seconds) — stored in Redis to prevent CSRF on callback
@@ -191,6 +197,15 @@ async def get_oauth_url(
             f"&permissions=2048"
             f"&state={state}"
         )
+    elif provider == "clickup":
+        if not settings.clickup_client_id:
+            raise HTTPException(status_code=503, detail="ClickUp OAuth not configured")
+        url = (
+            f"https://app.clickup.com/api"
+            f"?client_id={settings.clickup_client_id}"
+            f"&redirect_uri={settings.clickup_redirect_uri}"
+            f"&state={state}"
+        )
     else:
         raise HTTPException(status_code=400, detail=f"OAuth not implemented for '{provider}'")
 
@@ -309,6 +324,22 @@ async def _exchange_oauth_code(provider: str, code: str) -> dict:
                 "guild_id": guild.get("id", ""),
                 "guild_name": guild.get("name", ""),
             }
+
+        elif provider == "clickup":
+            resp = await client.post(
+                "https://api.clickup.com/api/v2/oauth/token",
+                data={
+                    "client_id": settings.clickup_client_id,
+                    "client_secret": settings.clickup_client_secret,
+                    "code": code,
+                    "redirect_uri": settings.clickup_redirect_uri,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"ClickUp token exchange failed: {data}")
+            return {"access_token": data["access_token"]}
 
         else:
             raise ValueError(f"OAuth not implemented for '{provider}'")
@@ -542,6 +573,58 @@ async def list_jira_projects(
     return {"success": True, "data": projects}
 
 
+@router.get("/clickup/lists")
+async def list_clickup_lists(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all ClickUp lists across all accessible workspaces and spaces."""
+    integration = await _get_integration(db, current_user.tenant_id, "clickup")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="ClickUp not connected")
+
+    token = integration.credentials.get("access_token")
+    headers = {"Authorization": token, "Content-Type": "application/json"}
+    all_lists: list[dict] = []
+
+    async with httpx.AsyncClient() as client:
+        teams_resp = await client.get("https://api.clickup.com/api/v2/team", headers=headers)
+        if teams_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Failed to fetch ClickUp workspaces")
+
+        teams = teams_resp.json().get("teams", [])
+        for team in teams:
+            team_id = team["id"]
+            team_name = team["name"]
+            spaces_resp = await client.get(
+                f"https://api.clickup.com/api/v2/team/{team_id}/space",
+                headers=headers,
+                params={"archived": "false"},
+            )
+            if spaces_resp.status_code != 200:
+                continue
+            spaces = spaces_resp.json().get("spaces", [])
+            for space in spaces:
+                space_id = space["id"]
+                space_name = space["name"]
+                lists_resp = await client.get(
+                    f"https://api.clickup.com/api/v2/space/{space_id}/list",
+                    headers=headers,
+                    params={"archived": "false"},
+                )
+                if lists_resp.status_code != 200:
+                    continue
+                for lst in lists_resp.json().get("lists", []):
+                    all_lists.append({
+                        "id": lst["id"],
+                        "name": lst["name"],
+                        "space_name": space_name,
+                        "team_name": team_name,
+                    })
+
+    return {"success": True, "data": all_lists}
+
+
 @router.get("/discord/channels")
 async def list_discord_channels(
     db: AsyncSession = Depends(get_db),
@@ -675,6 +758,52 @@ async def configure_integration(
             creds = dict(integration.credentials or {})
             creds["webhook_url"] = webhook_url
             integration.credentials = creds
+    elif provider == "clickup":
+        lists = selections.get("lists", [])
+        meta["list_ids"] = [lst.get("id") if isinstance(lst, dict) else lst for lst in lists]
+        meta["list_names"] = [lst.get("name", "") if isinstance(lst, dict) else lst for lst in lists]
+        meta["active_lists"] = len(lists)
+
+        token = (integration.credentials or {}).get("access_token")
+        backend_base = settings.backend_url or "http://localhost:8000"
+        webhook_endpoint = f"{backend_base}/v1/webhooks/clickup/{current_user.tenant_id}"
+
+        if token and backend_base:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                headers = {"Authorization": token}
+
+                # Resolve workspace/team ID
+                teams_resp = await client.get("https://api.clickup.com/api/v2/team", headers=headers)
+                teams = teams_resp.json().get("teams", []) if teams_resp.status_code == 200 else []
+
+                if teams:
+                    team_id = teams[0]["id"]
+
+                    # Delete previous webhook registration so we don't accumulate stale hooks
+                    old_webhook_id = meta.get("clickup_webhook_id")
+                    if old_webhook_id:
+                        await client.delete(
+                            f"https://api.clickup.com/api/v2/webhook/{old_webhook_id}",
+                            headers=headers,
+                        )
+
+                    # Register the inbound webhook for taskStatusUpdated events
+                    hook_resp = await client.post(
+                        f"https://api.clickup.com/api/v2/team/{team_id}/webhook",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={"endpoint": webhook_endpoint, "events": ["taskStatusUpdated"]},
+                    )
+                    if hook_resp.status_code == 200:
+                        hook_data = hook_resp.json()
+                        webhook_info = hook_data.get("webhook", {})
+                        secret = webhook_info.get("secret", "")
+                        webhook_id = webhook_info.get("id", "")
+                        if secret:
+                            creds = dict(integration.credentials or {})
+                            creds["webhook_secret"] = secret
+                            integration.credentials = creds
+                        meta["clickup_webhook_id"] = webhook_id
+                        meta["clickup_webhook_url"] = webhook_endpoint
 
     integration.config = meta
 
