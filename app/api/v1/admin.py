@@ -3,12 +3,13 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_super_admin
 from app.config import settings
 from app.database import get_db
+from app.models.audit import AuditLog
 from app.models.feedback import FeedbackItem
 from app.models.integration import Integration
 from app.models.tenant import Tenant
@@ -211,3 +212,88 @@ async def admin_trends(
     daily = [{"date": str(row.date), "count": row.count} for row in daily_result]
 
     return {"success": True, "data": {"daily": daily, "period_days": days}}
+
+
+# ---------------------------------------------------------------------------
+# Audit Logs — platform-wide, super_admin only
+# ---------------------------------------------------------------------------
+
+@router.get("/audit-logs")
+async def audit_logs(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=200),
+    action: str | None = Query(None),
+    tenant_id: str | None = Query(None),
+    search: str | None = Query(None, description="Free-text search across action, resource type, IP, actor email/name, tenant name"),
+    since: str | None = Query(None, description="ISO timestamp — return only entries after this point"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_super_admin),
+):
+    query = select(AuditLog).order_by(desc(AuditLog.ts))
+
+    if action:
+        query = query.where(AuditLog.action == action)
+    if tenant_id:
+        query = query.where(AuditLog.tenant_id == tenant_id)
+    if search:
+        term = f"%{search}%"
+        matching_actor_ids = select(User.id).where(
+            or_(User.email.ilike(term), User.full_name.ilike(term))
+        )
+        matching_tenant_ids = select(Tenant.id).where(Tenant.name.ilike(term))
+        query = query.where(
+            or_(
+                AuditLog.action.ilike(term),
+                AuditLog.resource_type.ilike(term),
+                AuditLog.ip.ilike(term),
+                AuditLog.actor_id.in_(matching_actor_ids),
+                AuditLog.tenant_id.in_(matching_tenant_ids),
+            )
+        )
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            query = query.where(AuditLog.ts > since_dt)
+        except ValueError:
+            pass
+
+    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+    rows_result = await db.execute(query.offset((page - 1) * per_page).limit(per_page))
+    rows = rows_result.scalars().all()
+
+    # Resolve actor emails and tenant names in bulk
+    actor_ids = list({r.actor_id for r in rows if r.actor_id})
+    tenant_ids = list({r.tenant_id for r in rows})
+
+    actors: dict[str, str] = {}
+    if actor_ids:
+        users_result = await db.execute(select(User).where(User.id.in_(actor_ids)))
+        for u in users_result.scalars().all():
+            actors[u.id] = u.full_name or u.email
+
+    tenants: dict[str, str] = {}
+    if tenant_ids:
+        tenants_result = await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+        for t in tenants_result.scalars().all():
+            tenants[t.id] = t.name
+
+    return {
+        "success": True,
+        "data": [
+            {
+                "id": r.id,
+                "ts": r.ts.isoformat(),
+                "action": r.action,
+                "actor_id": r.actor_id,
+                "actor_label": actors.get(r.actor_id, "system") if r.actor_id else "system",
+                "tenant_id": r.tenant_id,
+                "tenant_name": tenants.get(r.tenant_id, r.tenant_id),
+                "resource_type": r.resource_type,
+                "resource_id": r.resource_id,
+                "diff": r.diff,
+                "ip": r.ip,
+            }
+            for r in rows
+        ],
+        "meta": {"total": total or 0, "page": page, "per_page": per_page},
+    }
