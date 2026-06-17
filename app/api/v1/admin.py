@@ -8,6 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_super_admin
 from app.config import settings
+from app.core.cache import (
+    ADMIN_OVERVIEW_TTL,
+    ADMIN_TENANTS_TTL,
+    cache_del,
+    cache_del_pattern,
+    cache_get,
+    cache_set,
+)
 from app.database import get_db
 from app.models.audit import AuditLog
 from app.models.feedback import FeedbackItem
@@ -66,6 +74,10 @@ async def admin_overview(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_super_admin),
 ):
+    cached = await cache_get("admin:overview")
+    if cached:
+        return {"success": True, "data": cached}
+
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
     prev_week_start = now - timedelta(days=14)
@@ -100,19 +112,18 @@ async def admin_overview(
             (((feedback_this_week or 0) - feedback_prev_week) / feedback_prev_week) * 100, 1
         )
 
-    return {
-        "success": True,
-        "data": {
-            "total_tenants": total_tenants or 0,
-            "total_users": total_users or 0,
-            "total_feedback": total_feedback or 0,
-            "active_integrations": active_integrations or 0,
-            "feedback_this_week": feedback_this_week or 0,
-            "feedback_prev_week": feedback_prev_week or 0,
-            "feedback_week_delta_pct": week_delta,
-            "plan_breakdown": plan_breakdown,
-        },
+    data = {
+        "total_tenants": total_tenants or 0,
+        "total_users": total_users or 0,
+        "total_feedback": total_feedback or 0,
+        "active_integrations": active_integrations or 0,
+        "feedback_this_week": feedback_this_week or 0,
+        "feedback_prev_week": feedback_prev_week or 0,
+        "feedback_week_delta_pct": week_delta,
+        "plan_breakdown": plan_breakdown,
     }
+    await cache_set("admin:overview", data, ADMIN_OVERVIEW_TTL)
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +137,11 @@ async def admin_tenants(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_super_admin),
 ):
+    cache_key = f"admin:tenants:{limit}:{offset}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
     total = await db.scalar(select(func.count()).select_from(Tenant))
 
     tenants_result = await db.execute(
@@ -181,11 +197,13 @@ async def admin_tenants(
         for t in tenants
     ]
 
-    return {
+    result = {
         "success": True,
         "data": rows,
         "meta": {"total": total or 0, "limit": limit, "offset": offset},
     }
+    await cache_set(cache_key, result, ADMIN_TENANTS_TTL)
+    return result
 
 
 # ---------------------------------------------------------------------------

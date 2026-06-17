@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_role
+from app.core.cache import TEAM_MEMBERS_TTL, cache_del, cache_del_pattern, cache_get, cache_set
 from app.core.cookies import clear_auth_cookies, set_auth_cookies
 from app.core.errors import ConflictException
 from app.core.rate_limit import get_redis
@@ -115,7 +116,11 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
         await db.rollback()
         raise ConflictException("An account with this email already exists")
 
-    # 7. Generate tokens and set cookies
+    # 7. Invalidate admin caches — new tenant + user change aggregate counts
+    await cache_del("admin:overview")
+    await cache_del_pattern("admin:tenants:*")
+
+    # 8. Generate tokens and set cookies
     access_token = create_access_token({"sub": user.id, "tenant_id": tenant.id})
     refresh_token = create_refresh_token({"sub": user.id, "tenant_id": tenant.id})
 
@@ -296,24 +301,28 @@ async def list_team_members(
     current_user: User = Depends(require_role("super_admin")),
 ):
     """Return all users in the current user's tenant (admin-only)."""
+    cache_key = f"auth:team-members:{current_user.tenant_id}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
+
     result = await db.execute(
         select(User).where(User.tenant_id == current_user.tenant_id).order_by(User.created_at)
     )
     users = result.scalars().all()
-    return {
-        "success": True,
-        "data": [
-            {
-                "user_id": u.id,
-                "full_name": u.full_name,
-                "email": u.email,
-                "role": u.role,
-                "oauth_provider": u.oauth_provider,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
-            }
-            for u in users
-        ],
-    }
+    data = [
+        {
+            "user_id": u.id,
+            "full_name": u.full_name,
+            "email": u.email,
+            "role": u.role,
+            "oauth_provider": u.oauth_provider,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
+    await cache_set(cache_key, data, TEAM_MEMBERS_TTL)
+    return {"success": True, "data": data}
 
 
 @router.delete("/team-members/{user_id}", status_code=204)
@@ -350,6 +359,10 @@ async def remove_team_member(
     db.add(audit)
     await db.delete(target)
     await db.commit()
+    await cache_del(
+        f"auth:team-members:{current_user.tenant_id}",
+        "admin:overview",
+    )
 
 
 @router.post("/invite-member", response_model=InviteMemberResponse)
@@ -393,6 +406,11 @@ async def invite_member(
     except IntegrityError:
         await db.rollback()
         raise ConflictException("A user with this email already exists")
+
+    await cache_del(
+        f"auth:team-members:{current_user.tenant_id}",
+        "admin:overview",
+    )
 
     return InviteMemberResponse(data={
         "user_id": new_user.id,

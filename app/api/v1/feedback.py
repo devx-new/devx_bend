@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.cache import cache_del_pattern
 from app.core.rate_limit import RateLimitDep
 from app.database import get_db
 from app.models.audit import AuditLog
@@ -58,10 +59,11 @@ async def create_feedback(
     await write_audit_log(db, tenant_id, current_user.id, "CREATE", "feedback_item", item.id)
     await db.commit()
     await db.refresh(item)
-    
+    await cache_del_pattern(f"analytics:{tenant_id}:*")
+
     from app.worker.orchestrator import start_feedback_pipeline
     start_feedback_pipeline.delay(item.id, tenant_id)
-    
+
     return item
 
 
@@ -149,4 +151,5 @@ async def update_feedback_status(
     )
     await db.commit()
     await db.refresh(item)
+    await cache_del_pattern(f"analytics:{tenant_id}:*")
     return item

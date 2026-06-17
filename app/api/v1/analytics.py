@@ -1,5 +1,4 @@
 import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, WebSocket, WebSocketDisconnect
@@ -7,8 +6,8 @@ from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.cache import ANALYTICS_TTL, cache_get, cache_set
 from app.core.cookies import ACCESS_TOKEN_COOKIE
-from app.core.rate_limit import get_redis
 from app.database import async_session_factory, get_db
 from app.models.feedback import FeedbackItem
 from app.models.survey import DevexSurvey
@@ -19,8 +18,6 @@ from app.schemas.survey import SurveyCreate, SurveyResponse
 from app.security import decode_token
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
-
-ANALYTICS_CACHE_TTL = 300  # 5 minutes
 
 # Sentiment thresholds — VADER compound score is −1.0 to +1.0
 # Standard VADER thresholds: positive ≥ 0.05, negative ≤ −0.05.
@@ -61,15 +58,10 @@ async def analytics_kpis(
 ):
     """KPIs for the current period with period-over-period deltas — cached 5 min."""
     tenant_id = current_user.tenant_id
-    cache_key = f"analytics:kpis:{tenant_id}:{days}"
-
-    try:
-        r = await get_redis()
-        cached = await r.get(cache_key)
-        if cached:
-            return {"success": True, "data": json.loads(cached)}
-    except Exception:
-        pass
+    cache_key = f"analytics:{tenant_id}:kpis:{days}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
@@ -179,12 +171,7 @@ async def analytics_kpis(
         },
     }
 
-    try:
-        r = await get_redis()
-        await r.setex(cache_key, ANALYTICS_CACHE_TTL, json.dumps(data))
-    except Exception:
-        pass
-
+    await cache_set(cache_key, data, ANALYTICS_TTL)
     return {"success": True, "data": data}
 
 
@@ -244,15 +231,10 @@ async def analytics_trends(
     current_user: User = Depends(get_current_user),
 ):
     tenant_id = current_user.tenant_id
-    cache_key = f"analytics:trends:{tenant_id}:{days}"
-
-    try:
-        r = await get_redis()
-        cached = await r.get(cache_key)
-        if cached:
-            return {"success": True, "data": json.loads(cached)}
-    except Exception:
-        pass
+    cache_key = f"analytics:{tenant_id}:trends:{days}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
 
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -318,12 +300,7 @@ async def analytics_trends(
         "total_weekly": total_weekly,
         "period_days": days,
     }
-    try:
-        r = await get_redis()
-        await r.setex(cache_key, ANALYTICS_CACHE_TTL, json.dumps(data))
-    except Exception:
-        pass
-
+    await cache_set(cache_key, data, ANALYTICS_TTL)
     return {"success": True, "data": data}
 
 
@@ -339,6 +316,11 @@ async def sentiment_breakdown(
 ):
     """Frustrated / Neutral / Positive counts with trend vs prior period."""
     tenant_id = current_user.tenant_id
+    cache_key = f"analytics:{tenant_id}:sentiment:{days}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
+
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     since_prev = now - timedelta(days=days * 2)
@@ -373,19 +355,18 @@ async def sentiment_breakdown(
     p_frust, p_neut, p_pos = _sentiment_counts(prev_rows)
     total_curr = c_frust + c_neut + c_pos or 1
 
-    return {
-        "success": True,
-        "data": {
-            "frustrated": {"count": c_frust, "pct": round(c_frust / total_curr * 100, 1)},
-            "neutral": {"count": c_neut, "pct": round(c_neut / total_curr * 100, 1)},
-            "positive": {"count": c_pos, "pct": round(c_pos / total_curr * 100, 1)},
-            "deltas": {
-                "frustrated_pct": _pct_change(c_frust, p_frust),
-                "positive_pct": _pct_change(c_pos, p_pos),
-            },
-            "period_days": days,
+    data = {
+        "frustrated": {"count": c_frust, "pct": round(c_frust / total_curr * 100, 1)},
+        "neutral": {"count": c_neut, "pct": round(c_neut / total_curr * 100, 1)},
+        "positive": {"count": c_pos, "pct": round(c_pos / total_curr * 100, 1)},
+        "deltas": {
+            "frustrated_pct": _pct_change(c_frust, p_frust),
+            "positive_pct": _pct_change(c_pos, p_pos),
         },
+        "period_days": days,
     }
+    await cache_set(cache_key, data, ANALYTICS_TTL)
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +382,11 @@ async def category_spikes(
 ):
     """Top spiking categories with daily time-series for mini charts."""
     tenant_id = current_user.tenant_id
+    cache_key = f"analytics:{tenant_id}:spikes:{days}:{limit}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
+
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     since_prev = now - timedelta(days=days * 2)
@@ -461,7 +447,9 @@ async def category_spikes(
         for cat in ranked
     ]
 
-    return {"success": True, "data": {"spikes": spikes, "period_days": days}}
+    data = {"spikes": spikes, "period_days": days}
+    await cache_set(cache_key, data, ANALYTICS_TTL)
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +464,11 @@ async def resolution_distribution(
 ):
     """Histogram of resolution times bucketed by days-to-close."""
     tenant_id = current_user.tenant_id
+    cache_key = f"analytics:{tenant_id}:resolution-dist:{days}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
+
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
     days_to_close = (
@@ -501,7 +494,9 @@ async def resolution_distribution(
     BUCKETS = ["0-1d", "1-3d", "3-7d", "7-14d", "14-30d", "30d+"]
     distribution = [{"bucket": b, "count": counts.get(b, 0)} for b in BUCKETS]
 
-    return {"success": True, "data": {"distribution": distribution, "period_days": days}}
+    data = {"distribution": distribution, "period_days": days}
+    await cache_set(cache_key, data, ANALYTICS_TTL)
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +512,11 @@ async def trending_topics(
 ):
     """Top feedback items by priority score with category-level spike labels."""
     tenant_id = current_user.tenant_id
+    cache_key = f"analytics:{tenant_id}:trending-topics:{days}:{limit}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return {"success": True, "data": cached}
+
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     since_prev = now - timedelta(days=days * 2)
@@ -568,7 +568,9 @@ async def trending_topics(
             "label": label,
         })
 
-    return {"success": True, "data": {"topics": topics, "period_days": days}}
+    data = {"topics": topics, "period_days": days}
+    await cache_set(cache_key, data, ANALYTICS_TTL)
+    return {"success": True, "data": data}
 
 
 # ---------------------------------------------------------------------------
