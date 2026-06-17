@@ -35,11 +35,11 @@ async def get_current_user(
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Account not found")
 
     tenant_id = payload.get("tenant_id")
     if not tenant_id or tenant_id != user.tenant_id:
-        raise HTTPException(status_code=401, detail="User not found in organization")
+        raise HTTPException(status_code=401, detail="Account not found in organization")
     return user
 
 
@@ -49,6 +49,13 @@ def require_role(role: str):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return current_user
     return role_checker
+
+
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Allows only company admins. Super admins are internal and excluded."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Company admin access required")
+    return current_user
 
 
 async def require_super_admin(current_user: User = Depends(get_current_user)) -> User:

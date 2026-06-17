@@ -1,5 +1,7 @@
 import logging
 import re
+import secrets
+import string
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -9,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_role
 from app.core.cookies import clear_auth_cookies, set_auth_cookies
 from app.core.errors import ConflictException
 from app.core.rate_limit import get_redis
@@ -17,7 +19,7 @@ from app.database import get_db
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.audit import AuditLog
-from app.schemas.auth import AuthSuccessResponse, LoginRequest, RegisterRequest
+from app.schemas.auth import AuthSuccessResponse, InviteMemberRequest, InviteMemberResponse, LoginRequest, RegisterRequest
 from app.security import (
     create_access_token,
     create_refresh_token,
@@ -27,6 +29,18 @@ from app.security import (
     verify_password,
     hash_password,
 )
+
+_PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$%^&*"
+
+
+def _generate_password(length: int = 16) -> str:
+    """Generate a cryptographically secure random password."""
+    while True:
+        pw = "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
+        # Ensure at least one of each character class
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw) and any(c in "!@#$%^&*" for c in pw)):
+            return pw
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
@@ -214,6 +228,7 @@ async def get_me(
         "success": True,
         "data": {
             "user_id": current_user.id,
+            "full_name": current_user.full_name,
             "email": current_user.email,
             "role": current_user.role,
             "tenant_id": current_user.tenant_id,
@@ -255,6 +270,9 @@ async def update_profile(
     current_user: User = Depends(get_current_user),
 ):
     """Update mutable profile fields (email)."""
+    if "full_name" in body:
+        current_user.full_name = body["full_name"].strip() or None
+
     if "email" in body:
         new_email = body["email"].strip().lower()
         existing = (await db.execute(select(User).where(User.email == new_email))).scalar_one_or_none()
@@ -270,6 +288,119 @@ async def update_profile(
 
     await db.commit()
     return {"success": True, "message": "Profile updated"}
+
+
+@router.get("/team-members")
+async def list_team_members(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("super_admin")),
+):
+    """Return all users in the current user's tenant (admin-only)."""
+    result = await db.execute(
+        select(User).where(User.tenant_id == current_user.tenant_id).order_by(User.created_at)
+    )
+    users = result.scalars().all()
+    return {
+        "success": True,
+        "data": [
+            {
+                "user_id": u.id,
+                "full_name": u.full_name,
+                "email": u.email,
+                "role": u.role,
+                "oauth_provider": u.oauth_provider,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ],
+    }
+
+
+@router.delete("/team-members/{user_id}", status_code=204)
+async def remove_team_member(
+    user_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("super_admin")),
+):
+    """Remove a member from the tenant. Admins cannot remove themselves or other admins."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="You cannot remove your own account")
+
+    result = await db.execute(
+        select(User).where(User.id == user_id, User.tenant_id == current_user.tenant_id)
+    )
+    target = result.scalar_one_or_none()
+    if not target:
+        raise HTTPException(status_code=404, detail="Account not found in your organization")
+
+    if target.role in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Admin accounts cannot be removed")
+
+    ip_addr = request.client.host if request.client else None
+    audit = AuditLog(
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.id,
+        action="user.remove",
+        resource_type="user",
+        resource_id=target.id,
+        diff={"email": target.email, "role": target.role},
+        ip=ip_addr,
+    )
+    db.add(audit)
+    await db.delete(target)
+    await db.commit()
+
+
+@router.post("/invite-member", response_model=InviteMemberResponse)
+async def invite_member(
+    body: InviteMemberRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("super_admin")),
+):
+    """Admin creates a team member account with a generated password."""
+    # Verify email uniqueness
+    result = await db.execute(select(User).where(User.email == body.email))
+    if result.scalar_one_or_none():
+        raise ConflictException("A user with this email already exists")
+
+    password = _generate_password()
+    new_user = User(
+        tenant_id=current_user.tenant_id,
+        email=str(body.email),
+        full_name=body.full_name,
+        password_hash=hash_password(password),
+        role="member",
+    )
+    db.add(new_user)
+    await db.flush()
+
+    ip_addr = request.client.host if request.client else None
+    audit = AuditLog(
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.id,
+        action="user.invite",
+        resource_type="user",
+        resource_id=new_user.id,
+        diff={"email": new_user.email, "full_name": new_user.full_name, "role": new_user.role},
+        ip=ip_addr,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictException("A user with this email already exists")
+
+    return InviteMemberResponse(data={
+        "user_id": new_user.id,
+        "full_name": new_user.full_name,
+        "email": new_user.email,
+        "password": password,
+        "role": new_user.role,
+    })
 
 
 @router.post("/oauth/github", response_model=AuthSuccessResponse)
