@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Widget Ingest — Quick Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f1f5f9; display: flex; justify-content: center; padding: 40px 16px; }
+    .card { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.12); padding: 32px; width: 100%; max-width: 520px; }
+    h1 { font-size: 18px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }
+    .sub { font-size: 13px; color: #64748b; margin-bottom: 24px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: #475569; margin-bottom: 4px; margin-top: 16px; }
+    input, textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 12px; font-size: 14px; color: #0f172a; outline: none; transition: border .15s; }
+    input:focus, textarea:focus { border-color: #1e40af; }
+    textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+    button { margin-top: 20px; width: 100%; padding: 10px; background: #1e40af; color: #fff; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+    button:hover:not(:disabled) { background: #1d3fa0; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .result { margin-top: 16px; padding: 12px 14px; border-radius: 8px; font-size: 13px; font-family: monospace; white-space: pre-wrap; word-break: break-all; display: none; }
+    .result.ok  { background: #f0fdf4; border: 1px solid #86efac; color: #166534; }
+    .result.err { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+    .divider { border: none; border-top: 1px solid #e2e8f0; margin: 24px 0 8px; }
+    .hint { font-size: 12px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Widget Ingest — Test</h1>
+  <p class="sub">Sends directly to <code>http://localhost:8000/v1/widget/ingest</code></p>
+
+  <div id="origin-hint" style="margin-bottom:8px;padding:10px 14px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;font-size:13px;color:#1e40af;">
+    <strong>Your current origin:</strong> <code id="origin-val"></code><br>
+    Add this to the key's <strong>Allowed Origins</strong> in the Docs → API Keys page, or 403s will be returned for browser requests.
+  </div>
+
+  <label>API Key <span style="color:#94a3b8;font-weight:400">(pk_live_…)</span></label>
+  <input id="key" type="text" placeholder="pk_live_..." autocomplete="off" />
+
+  <label>
+    Title <span style="color:#ef4444">*</span>
+    <span id="title-count" style="float:right;font-weight:400;color:#94a3b8">0 / 10 min</span>
+  </label>
+  <input id="title" type="text" placeholder="Bug: checkout button unresponsive on Safari" value="" oninput="updateCount()" />
+  <p id="title-hint" style="font-size:12px;color:#ef4444;margin-top:4px;display:none">At least 10 characters required</p>
+
+  <label>
+    Body <span style="color:#94a3b8;font-weight:400">(optional)</span>
+    <span id="body-count" style="float:right;font-weight:400;color:#94a3b8"></span>
+  </label>
+  <textarea id="body" placeholder="Full description of the issue..." oninput="updateBodyCount()"></textarea>
+  <p id="body-hint" style="font-size:12px;color:#ef4444;margin-top:4px;display:none">At least 10 characters required if provided</p>
+
+  <label>User handle <span style="color:#94a3b8;font-weight:400">(optional)</span></label>
+  <input id="handle" type="text" placeholder="user@example.com" />
+
+  <button id="btn" onclick="send()">Send feedback</button>
+  <pre id="result" class="result"></pre>
+
+  <hr class="divider" />
+  <p class="hint">
+    <strong>401</strong> — key is missing, wrong, or revoked.<br>
+    <strong>403</strong> — key is valid but this page's origin (<code id="origin-footer"></code>) is not in the key's allowed origins.<br>
+    <strong>429</strong> — rate limit hit (60 req / min per key).
+  </p>
+</div>
+
+<script>
+async function send() {
+  const key    = document.getElementById('key').value.trim()
+  const title  = document.getElementById('title').value.trim()
+  const body   = document.getElementById('body').value.trim()
+  const handle = document.getElementById('handle').value.trim()
+  const btn    = document.getElementById('btn')
+  const out    = document.getElementById('result')
+
+  if (!key)          return flash(out, 'err', 'API key is required')
+  if (!title)        return flash(out, 'err', 'Title is required')
+  if (title.length < 10) return flash(out, 'err', 'title must be at least 10 characters')
+  if (body && body.length < 10) return flash(out, 'err', 'description must be at least 10 characters if provided')
+
+  btn.disabled = true
+  btn.textContent = 'Sending…'
+  out.style.display = 'none'
+
+  try {
+    const res = await fetch('http://localhost:8000/v1/widget/ingest', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title,
+        body:        body   || undefined,
+        user_handle: handle || undefined,
+      }),
+    })
+
+    const data = await res.json()
+    flash(out, res.ok ? 'ok' : 'err',
+      `HTTP ${res.status}\n\n${JSON.stringify(data, null, 2)}`
+    )
+  } catch (e) {
+    flash(out, 'err', `Network error: ${e.message}`)
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Send feedback'
+  }
+}
+
+function flash(el, cls, text) {
+  el.className = `result ${cls}`
+  el.textContent = text
+  el.style.display = 'block'
+}
+
+function updateCount() {
+  const len = document.getElementById('title').value.trim().length
+  const counter = document.getElementById('title-count')
+  const hint = document.getElementById('title-hint')
+  counter.textContent = `${len} / 10 min`
+  counter.style.color = len >= 10 ? '#22c55e' : '#ef4444'
+  hint.style.display = len > 0 && len < 10 ? 'block' : 'none'
+}
+updateCount()
+
+function updateBodyCount() {
+  const len = document.getElementById('body').value.trim().length
+  const counter = document.getElementById('body-count')
+  const hint = document.getElementById('body-hint')
+  if (len === 0) {
+    counter.textContent = ''
+    hint.style.display = 'none'
+  } else {
+    counter.textContent = `${len} / 10 min`
+    counter.style.color = len >= 10 ? '#22c55e' : '#ef4444'
+    hint.style.display = len < 10 ? 'block' : 'none'
+  }
+}
+
+// Show current origin
+const origin = window.location.origin
+document.getElementById('origin-val').textContent = origin
+document.getElementById('origin-footer').textContent = origin
+
+// Allow Enter in title to submit
+document.getElementById('title').addEventListener('keydown', e => {
+  if (e.key === 'Enter') send()
+})
+</script>
+</body>
+</html>

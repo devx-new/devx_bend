@@ -7,6 +7,7 @@ from app.models.notification import NotificationsLog
 from app.models.survey import DevexSurvey
 from app.models.audit import AuditLog
 from app.models.digest import WeeklyDigest
+from app.models.widget_key import WidgetKey
 
 __all__ = [
     "Tenant",
@@ -20,4 +21,5 @@ __all__ = [
     "DevexSurvey",
     "AuditLog",
     "WeeklyDigest",
+    "WidgetKey",
 ]

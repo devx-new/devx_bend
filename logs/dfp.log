@@ -109,3 +109,30 @@ HTTP Request: GET https://api.clickup.com/api/v2/space/901511195519/list?archive
 HTTP Request: GET https://api.clickup.com/api/v2/team "HTTP/1.1 200 OK"
 HTTP Request: POST https://api.clickup.com/api/v2/team/90152589620/webhook "HTTP/1.1 200 OK"
 HTTP Request: GET https://api.github.com/user/repos?per_page=100&sort=updated "HTTP/1.1 200 OK"
+Widget key revoked
+Widget ingest rejected — invalid or revoked key
+Widget ingest rejected — origin not in allowlist
+Widget ingest rejected — origin not in allowlist
+Widget ingest rejected — origin not in allowlist
+Widget ingest rejected — invalid or revoked key
+Widget ingest rejected — invalid or revoked key
+Widget ingest rejected — invalid or revoked key
+Widget key created
+Widget ingest rejected — origin not in allowlist
+Widget key revoked
+Widget key created
+Widget feedback ingested
+HTTP Request: GET https://api.clickup.com/api/v2/team "HTTP/1.1 200 OK"
+HTTP Request: GET https://api.clickup.com/api/v2/team/90152589620/space?archived=false "HTTP/1.1 200 OK"
+HTTP Request: GET https://api.clickup.com/api/v2/space/901511195519/list?archived=false "HTTP/1.1 200 OK"
+Widget feedback ingested
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
+Notifications marked as read
