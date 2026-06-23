@@ -706,31 +706,40 @@ async def configure_integration(
                     "Accept": "application/vnd.github+json",
                 }
                 for repo in repos:
-                    # Fetch existing hooks and skip if ours is already there
                     existing_resp = await client.get(
                         f"https://api.github.com/repos/{repo}/hooks",
                         headers=headers,
                         params={"per_page": 100},
                         timeout=10.0,
                     )
-                    already_registered = any(
-                        h.get("config", {}).get("url") == hook_url
-                        for h in (existing_resp.json() if existing_resp.status_code == 200 else [])
+                    existing_hooks = existing_resp.json() if existing_resp.status_code == 200 else []
+                    existing_hook = next(
+                        (h for h in existing_hooks if h.get("config", {}).get("url") == hook_url),
+                        None,
                     )
-                    if not already_registered:
+                    hook_config = {
+                        "name": "web",
+                        "active": True,
+                        "events": ["issues"],
+                        "config": {
+                            "url": hook_url,
+                            "content_type": "json",
+                            "secret": webhook_secret,
+                        },
+                    }
+                    if existing_hook:
+                        # Always patch to keep the secret in sync with the DB value
+                        await client.patch(
+                            f"https://api.github.com/repos/{repo}/hooks/{existing_hook['id']}",
+                            headers=headers,
+                            json=hook_config,
+                            timeout=10.0,
+                        )
+                    else:
                         await client.post(
                             f"https://api.github.com/repos/{repo}/hooks",
                             headers=headers,
-                            json={
-                                "name": "web",
-                                "active": True,
-                                "events": ["issues"],
-                                "config": {
-                                    "url": hook_url,
-                                    "content_type": "json",
-                                    "secret": webhook_secret,
-                                },
-                            },
+                            json=hook_config,
                             timeout=10.0,
                         )
 
