@@ -34,6 +34,7 @@ def _get_nvidia_client() -> OpenAI:
     return OpenAI(
         base_url=NVIDIA_BASE_URL,
         api_key=settings.nvidia_api_key,
+        timeout=30.0,
     )
 
 
@@ -135,7 +136,7 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
                 g_response = g_client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=prompt,
-                    config=gtypes.GenerateContentConfig(temperature=0.1),
+                    config=gtypes.GenerateContentConfig(temperature=0.1, http_options=gtypes.HttpOptions(timeout=30000)),
                 )
                 raw = g_response.text.strip().lower()
                 category = raw if raw in CATEGORIES else "uncategorized"
