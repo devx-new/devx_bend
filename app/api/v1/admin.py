@@ -158,6 +158,14 @@ async def admin_tenants(
     )
     user_counts = {row.tenant_id: row.count for row in user_counts_result}
 
+    # Primary email per tenant (earliest-created user)
+    owner_email_result = await db.execute(
+        select(User.tenant_id, func.min(User.email).label("email"))
+        .where(User.tenant_id.in_(tenant_ids))
+        .group_by(User.tenant_id)
+    )
+    owner_emails = {row.tenant_id: row.email for row in owner_email_result}
+
     # Feedback counts per tenant
     feedback_counts_result = await db.execute(
         select(FeedbackItem.tenant_id, func.count().label("count"))
@@ -186,7 +194,7 @@ async def admin_tenants(
         {
             "id": t.id,
             "name": t.name,
-            "email": user_counts.get(t.id, {}).get("email", ""),
+            "email": owner_emails.get(t.id),
             "slug": t.slug,
             "plan_tier": t.plan_tier,
             "user_count": user_counts.get(t.id, 0),
