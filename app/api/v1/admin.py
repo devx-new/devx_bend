@@ -186,6 +186,7 @@ async def admin_tenants(
         {
             "id": t.id,
             "name": t.name,
+            "email": user_counts.get(t.id, {}).get("email", ""),
             "slug": t.slug,
             "plan_tier": t.plan_tier,
             "user_count": user_counts.get(t.id, 0),
