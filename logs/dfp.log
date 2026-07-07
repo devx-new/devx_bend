@@ -148,3 +148,7 @@ HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f
 HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/project/search?maxResults=50 "HTTP/1.1 401 Unauthorized"
 HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/project/search?maxResults=50 "HTTP/1.1 401 Unauthorized"
 HTTP Request: POST https://auth.atlassian.com/oauth/token "HTTP/1.1 400 Bad Request"
+Widget feedback ingested
+Queued feedback-resolved email
+Widget feedback ingested
+Queued feedback-resolved email
