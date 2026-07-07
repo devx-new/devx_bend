@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ subject }}</title>
+<style>
+  body, table, td { margin: 0; padding: 0; }
+  body { background-color: #F8FAFC; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+  img { border: 0; display: block; }
+  a { color: #1E40AF; }
+  .card { background-color: #FFFFFF; border-radius: 12px; border: 1px solid #E2E8F0; overflow: hidden; }
+  .btn { display: inline-block; background-color: #1E40AF; color: #FFFFFF !important; text-decoration: none; font-weight: 600; font-size: 14px; padding: 12px 24px; border-radius: 8px; }
+  @media (max-width: 480px) {
+    .container { width: 100% !important; }
+    .px { padding-left: 20px !important; padding-right: 20px !important; }
+  }
+</style>
+</head>
+<body>
+  {% if preheader %}
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{ preheader }}</div>
+  {% endif %}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8FAFC;">
+    <tr>
+      <td align="center" style="padding: 32px 16px;">
+        <table role="presentation" class="container" width="560" cellpadding="0" cellspacing="0" style="width:560px;">
+          <tr>
+            <td style="padding: 0 4px 20px 4px;">
+              <span style="font-size:20px;font-weight:700;color:#1E40AF;letter-spacing:-0.02em;">{{ org_name or "DevX" }}</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="card">
+              <div class="px" style="padding: 32px 40px;">
+                {% block content %}{% endblock %}
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 24px 4px 0 4px;">
+              <p style="margin:0 0 8px 0;font-size:12px;line-height:18px;color:#94A3B8;">
+                {% block footer %}
+                You're receiving this email because of your interaction with {{ org_name or "DevX" }}.
+                {% endblock %}
+              </p>
+              <p style="margin:0;font-size:11px;line-height:16px;color:#CBD5E1;">
+                Powered by DevX Inc.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

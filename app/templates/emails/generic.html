@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px 0;font-size:20px;line-height:28px;color:#0F172A;font-weight:700;">{{ heading }}</h1>
+
+  {% for paragraph in body_paragraphs %}
+  <p style="margin:0 0 16px 0;font-size:15px;line-height:24px;color:#334155;">{{ paragraph | safe }}</p>
+  {% endfor %}
+
+  {% if details %}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F1F5F9;border-radius:8px;margin:0 0 24px 0;">
+    {% for row in details %}
+    <tr>
+      <td style="padding:10px 16px;font-size:13px;color:#64748B;width:35%;">{{ row.label }}</td>
+      <td style="padding:10px 16px;font-size:13px;color:#0F172A;font-weight:600;">{{ row.value }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if button_url %}
+  <table role="presentation" cellpadding="0" cellspacing="0">
+    <tr>
+      <td>
+        <a href="{{ button_url }}" class="btn" target="_blank">{{ button_text or "View in DevX" }}</a>
+      </td>
+    </tr>
+  </table>
+  {% endif %}
+{% endblock %}

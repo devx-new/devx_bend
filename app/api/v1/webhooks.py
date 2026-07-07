@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import logging
 import time
 from datetime import datetime, timezone
 
@@ -11,10 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.notifications import notify_feedback_resolved
 from app.database import get_db
 from app.models.feedback import FeedbackItem
 from app.models.integration import Integration
 from app.worker.orchestrator import start_feedback_pipeline
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -308,6 +312,7 @@ async def jira_webhook_tenant(tenant_id: str, request: Request, db: AsyncSession
             feedback_item.status = devx_status
             feedback_item.resolved_at = datetime.now(timezone.utc)
             await db.commit()
+            await notify_feedback_resolved(feedback_item, db)
 
     return {"success": True, "message": {"received": True}}
 
@@ -369,6 +374,7 @@ async def clickup_webhook_tenant(tenant_id: str, request: Request, db: AsyncSess
                 feedback_item.status = devx_status
                 feedback_item.resolved_at = datetime.now(timezone.utc)
                 await db.commit()
+                await notify_feedback_resolved(feedback_item, db)
 
     return {"success": True, "message": {"received": True}}
 

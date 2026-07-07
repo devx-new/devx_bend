@@ -136,3 +136,15 @@ Notifications marked as read
 Notifications marked as read
 Notifications marked as read
 Notifications marked as read
+Widget feedback ingested
+Widget feedback ingested
+Widget feedback ingested
+Widget feedback ingested
+Widget feedback ingested
+Queued feedback-resolved email
+Skipping feedback-resolved email — not a widget submission or no submitter email
+Widget feedback ingested
+HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/project/search?maxResults=50 "HTTP/1.1 401 Unauthorized"
+HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/project/search?maxResults=50 "HTTP/1.1 401 Unauthorized"
+HTTP Request: GET https://api.atlassian.com/ex/jira/81102c3e-f1b1-4e6e-acd4-788f51f415f4/rest/api/3/project/search?maxResults=50 "HTTP/1.1 401 Unauthorized"
+HTTP Request: POST https://auth.atlassian.com/oauth/token "HTTP/1.1 400 Bad Request"

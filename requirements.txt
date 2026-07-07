@@ -14,6 +14,8 @@ pydantic-settings
 pydantic[email]
 httpx
 structlog
+resend
+jinja2
 celery
 aiosqlite
 vaderSentiment

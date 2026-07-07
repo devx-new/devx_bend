@@ -12,7 +12,8 @@ celery_app = Celery(
         "app.agents.prioritization",
         "app.agents.routing",
         "app.agents.digest",
-        "app.worker.orchestrator"
+        "app.worker.orchestrator",
+        "app.worker.email_tasks",
     ]
 )
 

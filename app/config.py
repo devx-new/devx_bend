@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     cookie_samesite: str = os.getenv("cookie_samesite", "lax")
     csrf_token_expire_minutes: int = int(os.getenv("csrf_token_expire_minutes", 60))
     super_admin_secret: str = os.getenv("SUPER_ADMIN_SECRET", "")
+    resend_api_key: str = os.getenv("resend_api_key", "")
+    email_from: str = os.getenv("email_from", "DevX Inc. <support@devx.today>")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

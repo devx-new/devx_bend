@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.cache import cache_del_pattern
+from app.core.notifications import notify_feedback_resolved
 from app.core.rate_limit import RateLimitDep
 from app.database import get_db
 from app.models.audit import AuditLog
@@ -152,4 +153,8 @@ async def update_feedback_status(
     await db.commit()
     await db.refresh(item)
     await cache_del_pattern(f"analytics:{tenant_id}:*")
+
+    if old_status not in ("resolved", "wont_fix") and item.status in ("resolved", "wont_fix"):
+        await notify_feedback_resolved(item, db)
+
     return item
