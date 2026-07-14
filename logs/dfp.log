@@ -152,3 +152,6 @@ Widget feedback ingested
 Queued feedback-resolved email
 Widget feedback ingested
 Queued feedback-resolved email
+HTTP Request: POST https://discord.com/api/oauth2/token "HTTP/1.1 200 OK"
+HTTP Request: GET https://discord.com/api/v10/guilds/1516041807228702850/channels "HTTP/1.1 200 OK"
+HTTP Request: POST https://auth.atlassian.com/oauth/token "HTTP/1.1 401 Unauthorized"
