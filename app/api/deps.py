@@ -58,6 +58,14 @@ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+async def require_verified_email(current_user: User = Depends(get_current_user)) -> User:
+    """Gate for actions with outward-facing side effects (inviting members, connecting
+    third-party integrations, creating routing rules) — requires a verified email."""
+    if not current_user.is_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email address to do this")
+    return current_user
+
+
 async def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "super_admin":
         raise HTTPException(status_code=403, detail="Insufficient permissions")

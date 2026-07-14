@@ -37,3 +37,23 @@ class InviteMemberRequest(BaseModel):
 class InviteMemberResponse(BaseModel):
     success: bool = True
     data: dict  # {user_id, full_name, email, password, role}
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def password_min_length(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v

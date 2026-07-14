@@ -1,9 +1,9 @@
 import hmac
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import delete, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_super_admin
@@ -18,10 +18,15 @@ from app.core.cache import (
 )
 from app.database import get_db
 from app.models.audit import AuditLog
-from app.models.feedback import FeedbackItem
+from app.models.digest import WeeklyDigest
+from app.models.feedback import DuplicateGroup, FeedbackItem, FeedbackTag
 from app.models.integration import Integration
+from app.models.notification import NotificationsLog
+from app.models.routing import RoutingRule
+from app.models.survey import DevexSurvey
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.widget_key import WidgetKey
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -324,3 +329,64 @@ async def audit_logs(
         ],
         "meta": {"total": total or 0, "page": page, "per_page": per_page},
     }
+
+
+# ---------------------------------------------------------------------------
+# Delete a tenant (account) and all of its data — super_admin only
+# ---------------------------------------------------------------------------
+
+@router.delete("/tenants/{tenant_id}")
+async def delete_tenant(
+    tenant_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """
+    Permanently delete a tenant and every row scoped to it. There are no DB-level
+    cascades on tenant_id (see migrations), so child tables are wiped in FK-safe
+    order before the tenant row itself. Irreversible.
+    """
+    if tenant_id == current_user.tenant_id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own organization")
+
+    tenant = await db.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    tenant_name, tenant_slug = tenant.name, tenant.slug
+    feedback_ids_subq = select(FeedbackItem.id).where(FeedbackItem.tenant_id == tenant_id)
+
+    await db.execute(delete(FeedbackTag).where(FeedbackTag.feedback_item_id.in_(feedback_ids_subq)))
+    await db.execute(delete(DuplicateGroup).where(DuplicateGroup.tenant_id == tenant_id))
+    await db.execute(delete(NotificationsLog).where(NotificationsLog.tenant_id == tenant_id))
+    await db.execute(delete(FeedbackItem).where(FeedbackItem.tenant_id == tenant_id))
+    await db.execute(delete(DevexSurvey).where(DevexSurvey.tenant_id == tenant_id))
+    await db.execute(delete(WeeklyDigest).where(WeeklyDigest.tenant_id == tenant_id))
+    await db.execute(delete(RoutingRule).where(RoutingRule.tenant_id == tenant_id))
+    await db.execute(delete(Integration).where(Integration.tenant_id == tenant_id))
+    await db.execute(delete(WidgetKey).where(WidgetKey.tenant_id == tenant_id))
+    await db.execute(delete(AuditLog).where(AuditLog.tenant_id == tenant_id))
+    await db.execute(delete(User).where(User.tenant_id == tenant_id))
+    await db.delete(tenant)
+
+    # Record the deletion under the acting super_admin's own tenant, since the
+    # deleted tenant's audit trail was just wiped along with everything else.
+    ip_addr = request.client.host if request.client else None
+    db.add(AuditLog(
+        tenant_id=current_user.tenant_id,
+        actor_id=current_user.id,
+        action="tenant.delete",
+        resource_type="tenant",
+        resource_id=tenant_id,
+        diff={"name": tenant_name, "slug": tenant_slug},
+        ip=ip_addr,
+    ))
+
+    await db.commit()
+
+    await cache_del("admin:overview")
+    await cache_del_pattern("admin:tenants:*")
+    await cache_del_pattern(f"auth:team-members:{tenant_id}")
+
+    return {"success": True, "message": "Tenant deleted"}

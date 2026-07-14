@@ -11,16 +11,32 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_user, require_role, require_verified_email
+from app.config import settings
 from app.core.cache import TEAM_MEMBERS_TTL, cache_del, cache_del_pattern, cache_get, cache_set
 from app.core.cookies import clear_auth_cookies, set_auth_cookies
 from app.core.errors import ConflictException
-from app.core.rate_limit import get_redis
+from app.core.rate_limit import check_rate_limit, get_redis
+from app.core.tokens import (
+    consume_email_verification_token,
+    consume_password_reset_token,
+    create_email_verification_token,
+    create_password_reset_token,
+)
 from app.database import get_db
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.audit import AuditLog
-from app.schemas.auth import AuthSuccessResponse, InviteMemberRequest, InviteMemberResponse, LoginRequest, RegisterRequest
+from app.schemas.auth import (
+    AuthSuccessResponse,
+    ForgotPasswordRequest,
+    InviteMemberRequest,
+    InviteMemberResponse,
+    LoginRequest,
+    RegisterRequest,
+    ResetPasswordRequest,
+    VerifyEmailRequest,
+)
 from app.security import (
     create_access_token,
     create_refresh_token,
@@ -30,6 +46,7 @@ from app.security import (
     verify_password,
     hash_password,
 )
+from app.worker.email_tasks import send_templated_email_task
 
 _PASSWORD_ALPHABET = string.ascii_letters + string.digits + "!@#$%^&*"
 
@@ -48,6 +65,77 @@ logger = logging.getLogger(__name__)
 
 LOCKOUT_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
+
+
+async def _queue_verification_email(user: User) -> None:
+    """Generate a one-time verification token and queue the email via Celery. Never raises."""
+    try:
+        token = await create_email_verification_token(user.id)
+        verify_url = f"{settings.frontend_url}/verify-email?token={token}"
+        async_result = send_templated_email_task.delay(
+            user.email,
+            "Verify your email address",
+            "generic.html",
+            heading="Verify your email address",
+            body_paragraphs=[
+                "Thanks for signing up for DevX! Please confirm your email address to finish setting up your account.",
+                "This link expires in 24 hours.",
+            ],
+            button_url=verify_url,
+            button_text="Verify email",
+        )
+        logger.info("Queued verification email", extra={"user_id": user.id, "task_id": async_result.id})
+    except Exception:
+        logger.exception("Failed to queue verification email", extra={"user_id": user.id})
+
+
+async def _queue_password_reset_email(user: User) -> None:
+    """Generate a one-time reset token and queue the email via Celery. Never raises."""
+    try:
+        token = await create_password_reset_token(user.id)
+        reset_url = f"{settings.frontend_url}/reset-password?token={token}"
+        async_result = send_templated_email_task.delay(
+            user.email,
+            "Reset your password",
+            "generic.html",
+            heading="Reset your password",
+            body_paragraphs=[
+                "We received a request to reset your DevX password. Click the button below to choose a new one.",
+                "If you didn't request this, you can safely ignore this email — your password won't be changed.",
+                "This link expires in 1 hour.",
+            ],
+            button_url=reset_url,
+            button_text="Reset password",
+        )
+        logger.info("Queued password reset email", extra={"user_id": user.id, "task_id": async_result.id})
+    except Exception:
+        logger.exception("Failed to queue password reset email", extra={"user_id": user.id})
+
+
+async def _queue_invite_email(user: User, password: str, org_name: str | None) -> None:
+    """Email an invited team member their login credentials. Never raises."""
+    try:
+        login_url = f"{settings.frontend_url}/login"
+        async_result = send_templated_email_task.delay(
+            user.email,
+            f"You've been invited to join {org_name or 'DevX'}",
+            "generic.html",
+            org_name=org_name,
+            heading=f"You've been invited to join {org_name or 'DevX'}",
+            body_paragraphs=[
+                "An account has been created for you on DevX. Use the credentials below to sign in.",
+                "We recommend changing your password after your first login.",
+            ],
+            details=[
+                {"label": "Email", "value": user.email},
+                {"label": "Temporary password", "value": password},
+            ],
+            button_url=login_url,
+            button_text="Log in to DevX",
+        )
+        logger.info("Queued invite email", extra={"user_id": user.id, "task_id": async_result.id})
+    except Exception:
+        logger.exception("Failed to queue invite email", extra={"user_id": user.id})
 
 
 @router.post("/register", response_model=AuthSuccessResponse)
@@ -120,7 +208,10 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
     await cache_del("admin:overview")
     await cache_del_pattern("admin:tenants:*")
 
-    # 8. Generate tokens and set cookies
+    # 8. Queue verification email in the background — never blocks registration
+    await _queue_verification_email(user)
+
+    # 9. Generate tokens and set cookies
     access_token = create_access_token({"sub": user.id, "tenant_id": tenant.id})
     refresh_token = create_refresh_token({"sub": user.id, "tenant_id": tenant.id})
 
@@ -215,6 +306,76 @@ async def logout(request: Request, response: Response):
     return {"success": True, "message": {"logged_out": True}}
 
 
+@router.post("/verify-email")
+async def verify_email(body: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """Redeem a one-time email verification token sent to the user's inbox."""
+    user_id = await consume_email_verification_token(body.token)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=400, detail="Account not found")
+
+    user.is_verified = True
+    await db.commit()
+    return {"success": True, "message": "Email verified"}
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Resend the verification email to the currently authenticated user."""
+    if current_user.is_verified:
+        return {"success": True, "message": "Email already verified"}
+
+    ip_addr = request.client.host if request.client else "unknown"
+    allowed = await check_rate_limit(f"resend-verification:{current_user.id}:{ip_addr}", "auth.resend_verification", max_requests=3, window_seconds=3600)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+
+    await _queue_verification_email(current_user)
+    return {"success": True, "message": "Verification email sent"}
+
+
+@router.post("/forgot-password")
+async def forgot_password(body: ForgotPasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Queue a password reset email if the account exists. Always returns success to avoid email enumeration."""
+    ip_addr = request.client.host if request.client else "unknown"
+    allowed = await check_rate_limit(f"forgot-password:{body.email}:{ip_addr}", "auth.forgot_password", max_requests=3, window_seconds=3600)
+    if not allowed:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if user and user.password_hash:
+        await _queue_password_reset_email(user)
+
+    return {"success": True, "message": "If an account with that email exists, a reset link has been sent"}
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Redeem a one-time password reset token and set a new password."""
+    user_id = await consume_password_reset_token(body.token)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=400, detail="Account not found")
+
+    user.password_hash = hash_password(body.new_password)
+    user.failed_attempts = 0
+    user.locked_until = None
+    await db.commit()
+    return {"success": True, "message": "Password reset successful"}
+
+
 @router.get("/oauth/github/url")
 async def github_oauth_url():
     return {"url": get_github_oauth_url()}
@@ -241,6 +402,7 @@ async def get_me(
             "tenant_slug": tenant.slug if tenant else None,
             "avatar_url": current_user.avatar_url,
             "oauth_provider": current_user.oauth_provider,
+            "is_verified": current_user.is_verified,
             "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
         },
     }
@@ -371,12 +533,19 @@ async def invite_member(
     request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role("super_admin")),
+    _verified: User = Depends(require_verified_email),
 ):
     """Admin creates a team member account with a generated password."""
-    # Verify email uniqueness
+    # Verify email uniqueness — User.email is unique platform-wide (login has no org
+    # selector), so an email can belong to exactly one tenant. Distinguish the two
+    # conflict cases so the error isn't confusing when the email simply isn't in
+    # *this* tenant's roster.
     result = await db.execute(select(User).where(User.email == body.email))
-    if result.scalar_one_or_none():
-        raise ConflictException("A user with this email already exists")
+    existing = result.scalar_one_or_none()
+    if existing:
+        if existing.tenant_id == current_user.tenant_id:
+            raise ConflictException("This person is already a member of your organization")
+        raise ConflictException("This email is already registered to a different organization on DevX")
 
     password = _generate_password()
     new_user = User(
@@ -411,6 +580,10 @@ async def invite_member(
         f"auth:team-members:{current_user.tenant_id}",
         "admin:overview",
     )
+
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    await _queue_invite_email(new_user, password, tenant.name if tenant else None)
 
     return InviteMemberResponse(data={
         "user_id": new_user.id,
@@ -459,6 +632,7 @@ async def github_oauth_callback(
             oauth_id=str(gh_user["id"]),
             avatar_url=gh_user.get("avatar_url"),
             role="member",
+            is_verified=True,  # GitHub already verified this identity
         )
         db.add(user)
         await db.commit()

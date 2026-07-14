@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_verified_email
 from app.config import settings
 from app.core.rate_limit import get_redis
 from app.database import get_db
@@ -128,6 +128,7 @@ async def list_integrations(
 async def get_oauth_url(
     provider: str,
     current_user: User = Depends(get_current_user),
+    _verified: User = Depends(require_verified_email),
 ):
     """Return the OAuth authorization URL for the given provider."""
     if provider not in _CATALOG or _CATALOG[provider]["coming_soon"]:
@@ -422,6 +423,7 @@ async def oauth_callback_api(
     state: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _verified: User = Depends(require_verified_email),
 ):
     """
     API-facing callback — frontend calls this after receiving the code from the redirect.
@@ -860,6 +862,7 @@ async def create_integration(
     body: IntegrationCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _verified: User = Depends(require_verified_email),
 ):
     tenant_id = current_user.tenant_id
     integration = Integration(
@@ -882,6 +885,7 @@ async def create_routing_rule(
     body: RoutingRuleCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _verified: User = Depends(require_verified_email),
 ):
     tenant_id = current_user.tenant_id
     rule = RoutingRule(
