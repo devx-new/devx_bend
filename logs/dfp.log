@@ -163,3 +163,5 @@ Queued verification email
 Queued verification email
 HTTP Request: POST https://slack.com/api/oauth.v2.access "HTTP/1.1 200 OK"
 Queued invite email
+HTTP Request: POST https://oauth2.googleapis.com/token "HTTP/1.1 200 OK"
+HTTP Request: GET https://gmail.googleapis.com/gmail/v1/users/me/labels "HTTP/1.1 200 OK"

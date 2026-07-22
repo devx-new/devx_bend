@@ -1,4 +1,5 @@
 import secrets
+import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_verified_email
 from app.config import settings
+from app.core import gmail
 from app.core.rate_limit import get_redis
 from app.database import get_db
 from app.models.integration import Integration
@@ -62,6 +64,12 @@ _CATALOG: dict[str, dict] = {
         "name": "ClickUp",
         "description": "Create ClickUp tasks automatically from high-priority feedback.",
         "scopes": ["task:write", "team:read"],
+        "coming_soon": False,
+    },
+    "gmail": {
+        "name": "Gmail",
+        "description": "Poll a Gmail inbox for feedback emails and turn them into tracked feedback items.",
+        "scopes": ["gmail.readonly"],
         "coming_soon": False,
     },
 }
@@ -207,6 +215,19 @@ async def get_oauth_url(
             f"&redirect_uri={settings.clickup_redirect_uri}"
             f"&state={state}"
         )
+    elif provider == "gmail":
+        if not settings.gmail_client_id:
+            raise HTTPException(status_code=503, detail="Gmail OAuth not configured")
+        url = (
+            f"https://accounts.google.com/o/oauth2/v2/auth"
+            f"?client_id={settings.gmail_client_id}"
+            f"&redirect_uri={settings.gmail_redirect_uri}"
+            f"&response_type=code"
+            f"&access_type=offline"
+            f"&prompt=consent"
+            f"&scope=https://www.googleapis.com/auth/gmail.readonly"
+            f"&state={state}"
+        )
     else:
         raise HTTPException(status_code=400, detail=f"OAuth not implemented for '{provider}'")
 
@@ -341,6 +362,37 @@ async def _exchange_oauth_code(provider: str, code: str) -> dict:
             if "access_token" not in data:
                 raise ValueError(f"ClickUp token exchange failed: {data}")
             return {"access_token": data["access_token"]}
+
+        elif provider == "gmail":
+            resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": settings.gmail_client_id,
+                    "client_secret": settings.gmail_client_secret,
+                    "redirect_uri": settings.gmail_redirect_uri,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            data = resp.json() if resp.status_code == 200 else {}
+            if "access_token" not in data:
+                raise ValueError(f"Gmail token exchange failed: {data}")
+            if "refresh_token" not in data:
+                # Google only returns a refresh_token on the first consent. If the user
+                # previously connected and revoked, they must be sent through the consent
+                # screen again (access_type=offline + prompt=consent already forces this
+                # on a fresh connect, so this should only happen on unusual reconnect flows).
+                raise ValueError(
+                    "Gmail did not return a refresh token — revoke DevX's access at "
+                    "https://myaccount.google.com/permissions and reconnect"
+                )
+            return {
+                "access_token": data["access_token"],
+                "refresh_token": data["refresh_token"],
+                "expires_at": time.time() + data.get("expires_in", 3600),
+                "token_type": data.get("token_type", "Bearer"),
+            }
 
         else:
             raise ValueError(f"OAuth not implemented for '{provider}'")
@@ -659,6 +711,34 @@ async def list_discord_channels(
     return {"success": True, "data": channels}
 
 
+@router.get("/gmail/labels")
+async def list_gmail_labels(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List Gmail labels accessible with the stored token, for the Connect wizard."""
+    integration = await _get_integration(db, current_user.tenant_id, "gmail")
+    if not integration or not integration.credentials:
+        raise HTTPException(status_code=404, detail="Gmail not connected")
+
+    try:
+        access_token, updated_credentials = await gmail.get_valid_access_token(integration.credentials)
+        if updated_credentials:
+            integration.credentials = updated_credentials
+            await db.commit()
+        labels = await gmail.list_labels(access_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    # Only user-created labels and the handful of system labels useful for filtering
+    visible = [
+        {"id": lbl["id"], "name": lbl["name"]}
+        for lbl in labels
+        if lbl.get("type") == "user" or lbl["id"] in ("INBOX", "IMPORTANT", "STARRED")
+    ]
+    return {"success": True, "data": visible}
+
+
 # ---------------------------------------------------------------------------
 # Step 3: save configuration (repos/teams/channels + routing rules)
 # ---------------------------------------------------------------------------
@@ -815,6 +895,15 @@ async def configure_integration(
                             integration.credentials = creds
                         meta["clickup_webhook_id"] = webhook_id
                         meta["clickup_webhook_url"] = webhook_endpoint
+
+    elif provider == "gmail":
+        labels = selections.get("labels", [])
+        label_names = [lbl.get("name") if isinstance(lbl, dict) else lbl for lbl in labels]
+        label_query = " ".join(f"label:{name}" for name in label_names)
+        extra_query = (selections.get("query") or "").strip()
+        meta["query"] = " ".join(filter(None, [label_query, extra_query]))
+        meta["label_names"] = label_names
+        meta["active_labels"] = len(labels)
 
     integration.config = meta
 

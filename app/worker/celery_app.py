@@ -14,6 +14,7 @@ celery_app = Celery(
         "app.agents.digest",
         "app.worker.orchestrator",
         "app.worker.email_tasks",
+        "app.worker.gmail_tasks",
     ]
 )
 
@@ -33,5 +34,9 @@ celery_app.conf.beat_schedule = {
     "weekly-digest": {
         "task": "app.agents.digest.generate_weekly_digest",
         "schedule": 604800.0, # Every 7 days
+    },
+    "gmail-poll": {
+        "task": "app.worker.gmail_tasks.poll_gmail_feedback",
+        "schedule": settings.gmail_poll_interval_seconds,
     },
 }

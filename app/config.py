@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     clickup_client_id: str = os.getenv("clickup_client_id", "")
     clickup_client_secret: str = os.getenv("clickup_client_secret", "")
     clickup_redirect_uri: str = os.getenv("clickup_redirect_uri", "")
+    gmail_client_id: str = os.getenv("gmail_client_id", "")
+    gmail_client_secret: str = os.getenv("gmail_client_secret", "")
+    gmail_redirect_uri: str = os.getenv("gmail_redirect_uri", "")
+    gmail_poll_interval_seconds: int = int(os.getenv("gmail_poll_interval_seconds", 120))
     allowed_origins: str = ""
     frontend_url: str = os.getenv("frontend_url", "http://localhost:5173")
     backend_url: str = os.getenv("backend_url", "")

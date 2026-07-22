@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -77,6 +77,7 @@ async def list_feedback(
     category: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    search: str | None = None,
 ):
     tenant_id = current_user.tenant_id
     query = select(FeedbackItem).where(FeedbackItem.tenant_id == tenant_id)
@@ -87,6 +88,11 @@ async def list_feedback(
         query = query.where(FeedbackItem.status == status)
     if source:
         query = query.where(FeedbackItem.source == source)
+    if search:
+        term = f"%{search}%"
+        query = query.where(
+            or_(FeedbackItem.title.ilike(term), FeedbackItem.body.ilike(term))
+        )
 
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar()

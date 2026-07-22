@@ -286,6 +286,55 @@ Available in the UI as "Not Connected". OAuth and webhook handler are not yet im
 
 ---
 
+### Gmail
+
+**What it does**
+
+| Direction | Trigger | Action |
+|---|---|---|
+| Inbound | Celery Beat poll (`gmail_poll_interval_seconds`, default 120s) | Fetches new messages matching the configured query/labels, creates a `FeedbackItem` per message, and runs the AI pipeline |
+| Outbound | *(not implemented — Gmail is inbound-only)* | — |
+
+Unlike the other providers, Gmail has no inbound webhook — Google requires either polling or a Cloud Pub/Sub push subscription (extra GCP setup). DevX polls instead: a Celery Beat task runs on a fixed interval and searches every connected inbox with Gmail's own query syntax (`after:<epoch>` is appended automatically using `Integration.last_sync_at` so each poll only looks at mail received since the last run).
+
+**Setup**
+
+1. Create an OAuth 2.0 Client ID (type "Web application") in Google Cloud Console, enable the Gmail API, and add the `https://www.googleapis.com/auth/gmail.readonly` scope.
+2. Set `gmail_client_id`, `gmail_client_secret`, `gmail_redirect_uri` in `.env`.
+3. Connect via the wizard: `GET /v1/integrations/gmail/oauth-url` → authorize (`access_type=offline&prompt=consent` forces Google to return a refresh token) → `POST /v1/integrations/gmail/callback`.
+4. Select labels to watch: `GET /v1/integrations/gmail/labels` → `POST /v1/integrations/gmail/configure` with `{ "selections": { "labels": [{ "id": "Label_1", "name": "feedback" }], "query": "" } }`. `query` accepts any raw Gmail search syntax and is ANDed with the selected labels.
+
+**Credentials stored**
+```json
+{
+  "access_token": "ya29...",
+  "refresh_token": "1//...",
+  "expires_at": 1753142400.0,
+  "token_type": "Bearer"
+}
+```
+`access_token` is refreshed automatically (via `refresh_token`) whenever it's within 60 seconds of expiry — both the OAuth-secured endpoints and the poll task persist the refreshed token back onto the `Integration` row.
+
+**Config stored (after /configure)**
+```json
+{
+  "query": "label:feedback",
+  "label_names": ["feedback"],
+  "active_labels": 1
+}
+```
+
+**Message → FeedbackItem mapping**
+
+| Gmail field | FeedbackItem field |
+|---|---|
+| Message `id` | `external_id` (dedup key, same pattern as other providers) |
+| `Subject` header | `title` |
+| First `text/plain` MIME part (fallback: snippet) | `body` |
+| `From` header | `author_handle` |
+
+---
+
 ## Routing Agent
 
 The routing agent (`agents/routing.py`) runs as Stage 7 of the Celery pipeline. It loads every `active` integration for the tenant and dispatches based on provider-specific rules.
@@ -411,6 +460,12 @@ linear_redirect_uri=
 slack_client_id=
 slack_client_secret=
 slack_redirect_uri=
+
+# Gmail
+gmail_client_id=
+gmail_client_secret=
+gmail_redirect_uri=
+gmail_poll_interval_seconds=120
 ```
 
 ---
@@ -421,7 +476,7 @@ slack_redirect_uri=
 integrations
   id               UUID PK
   tenant_id        FK → tenants.id
-  provider         github | linear | slack | discord | gitlab | jira
+  provider         github | linear | slack | discord | gitlab | jira | clickup | gmail
   credentials      JSON  — OAuth tokens (encrypt in production, see Issue #13)
   config           JSON  — non-sensitive: repo_names, channel_ids, team_ids, display stats
   webhook_secret   TEXT  — HMAC secret for inbound webhook verification
