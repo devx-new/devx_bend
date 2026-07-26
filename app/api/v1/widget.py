@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.relevance import is_feedback_relevant, is_noise_by_rules
 from app.api.deps import get_current_user
 from app.core.rate_limit import check_rate_limit
 from app.database import get_db
@@ -299,6 +300,16 @@ async def widget_ingest(
     body_text = (payload.body or "").strip()
     if body_text and len(body_text) < 10:
         raise HTTPException(status_code=422, detail="description must be at least 10 characters if provided")
+
+    noise_check = {"from": payload.user_handle or "", "label_ids": [], "body": body_text or title}
+    if is_noise_by_rules(noise_check) or not await is_feedback_relevant(
+        subject=title, body=body_text, sender=payload.user_handle or ""
+    ):
+        logger.info(
+            "Widget submission classified as non-feedback — accepted but not queued",
+            extra={"tenant_id": wk.tenant_id, "key_id": wk.id},
+        )
+        return {"success": True, "data": {"id": None}}
 
     ip = request.client.host if request.client else None
     external_id = f"widget-{wk.id}-{uuid.uuid4()}"

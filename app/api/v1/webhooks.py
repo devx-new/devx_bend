@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.relevance import is_feedback_relevant, is_noise_by_rules
 from app.config import settings
 from app.core.notifications import notify_feedback_resolved
 from app.database import get_db
@@ -528,6 +529,9 @@ async def slack_events(request: Request, db: AsyncSession = Depends(get_db)):
     if not text:
         return {"success": True, "message": {"received": True}}
 
+    if is_noise_by_rules({"from": event.get("user", ""), "label_ids": [], "body": text}):
+        return {"success": True, "message": {"received": True}}
+
     team_id = payload.get("team_id", "")
 
     # Resolve tenant by matching team_id stored in integration credentials
@@ -560,6 +564,10 @@ async def slack_events(request: Request, db: AsyncSession = Depends(get_db)):
         )
     )
     if existing:
+        return {"success": True, "message": {"received": True}}
+
+    if not await is_feedback_relevant(subject="", body=text, sender=user):
+        logger.info(f"Skipping Slack message {external_id} (classified as non-feedback)")
         return {"success": True, "message": {"received": True}}
 
     item = FeedbackItem(
