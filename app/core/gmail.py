@@ -113,4 +113,5 @@ async def get_message(access_token: str, message_id: str) -> dict:
         "subject": headers.get("subject", "(no subject)"),
         "from": headers.get("from", ""),
         "body": _extract_body(payload) or data.get("snippet", ""),
+        "label_ids": data.get("labelIds", []),
     }

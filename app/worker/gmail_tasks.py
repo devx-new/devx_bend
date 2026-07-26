@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.relevance import is_feedback_relevant, is_noise_by_rules
 from app.core import gmail
 from app.database import async_session_factory, run_in_celery
 from app.models.feedback import FeedbackItem
@@ -52,6 +53,14 @@ async def _poll_integration(integration: Integration, session: AsyncSession) -> 
             message = await gmail.get_message(access_token, message_id)
         except ValueError as exc:
             logger.error(f"Gmail message fetch failed ({message_id}): {exc}")
+            continue
+
+        if is_noise_by_rules(message):
+            logger.info(f"Skipping Gmail message {message_id} (matched non-feedback rule)")
+            continue
+
+        if not await is_feedback_relevant(message["subject"], message["body"], message["from"]):
+            logger.info(f"Skipping Gmail message {message_id} (classified as non-feedback)")
             continue
 
         item = FeedbackItem(
