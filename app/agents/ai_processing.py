@@ -27,7 +27,27 @@ def _get_embed_model():
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_CLASSIFY_MODEL = "meta/llama-3.1-8b-instruct"  # lightweight for classify
 
-CATEGORIES = ["bug", "feature", "docs", "performance", "security"]
+CATEGORIES = [
+    "bug", "feature", "docs", "performance", "security",
+    "praise", "ux", "billing", "onboarding", "support",
+    "accessibility", "integration", "churn-risk",
+]
+
+_CATEGORY_HINTS = (
+    "bug: something broken or not working as expected\n"
+    "feature: a request for new functionality\n"
+    "docs: documentation is missing, wrong, or confusing\n"
+    "performance: something is slow or resource-heavy\n"
+    "security: a vulnerability or security concern\n"
+    "praise: a compliment or positive reaction, with no problem to fix\n"
+    "ux: confusing or hard to use, but not technically broken\n"
+    "billing: pricing, invoicing, subscription, or payment issues\n"
+    "onboarding: friction during first-time setup or getting started\n"
+    "support: account access, login, or other account-specific trouble\n"
+    "accessibility: a11y barriers — screen readers, keyboard nav, contrast, etc.\n"
+    "integration: something wrong with a specific connected third-party tool, not the core product\n"
+    "churn-risk: signals the customer may cancel or is seriously dissatisfied, beyond a normal complaint\n"
+)
 
 
 def _get_nvidia_client() -> OpenAI:
@@ -96,8 +116,8 @@ async def _classify_feedback_async(feedback_item_id: str, tenant_id: str) -> dic
 
         feedback_text = " ".join(filter(None, [item.title, item.body]))
         prompt = (
-            f"Classify the following developer feedback into exactly ONE of these categories: "
-            f"{', '.join(CATEGORIES)}.\n\n"
+            "Classify the following developer feedback into exactly ONE of these categories:\n"
+            f"{_CATEGORY_HINTS}\n"
             f"Feedback: {feedback_text}\n\n"
             f"Output ONLY the category name in lowercase, nothing else."
         )

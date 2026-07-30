@@ -110,8 +110,14 @@ async def _route_to_slack(item: FeedbackItem, integration: Integration, session,
         return False
 
 
+_GITHUB_ISSUE_CATEGORIES = (
+    "bug", "feature", "performance", "security",
+    "ux", "accessibility", "integration", "onboarding",
+)
+
+
 async def _route_to_github(item: FeedbackItem, integration: Integration, session, repo_override: str | None = None) -> bool:
-    if item.category not in ("bug", "feature", "performance", "security"):
+    if item.category not in _GITHUB_ISSUE_CATEGORIES:
         return False
 
     creds = integration.credentials or {}
@@ -164,10 +170,14 @@ async def _route_to_github(item: FeedbackItem, integration: Integration, session
 
 
 _JIRA_PREFERRED_TYPES = {
-    "bug":         ["Bug", "Defect", "Issue", "Task"],
-    "feature":     ["Story", "Feature", "Task", "Issue"],
-    "security":    ["Bug", "Defect", "Task", "Issue"],
-    "performance": ["Bug", "Task", "Issue"],
+    "bug":           ["Bug", "Defect", "Issue", "Task"],
+    "feature":       ["Story", "Feature", "Task", "Issue"],
+    "security":      ["Bug", "Defect", "Task", "Issue"],
+    "performance":   ["Bug", "Task", "Issue"],
+    "ux":            ["Story", "Task", "Bug", "Issue"],
+    "accessibility": ["Bug", "Task", "Issue"],
+    "integration":   ["Bug", "Task", "Issue"],
+    "onboarding":    ["Story", "Task", "Issue"],
 }
 _JIRA_DEFAULT_PREFERENCE = ["Task", "Story", "Bug", "Issue", "Subtask"]
 

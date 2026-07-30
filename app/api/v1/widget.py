@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.relevance import is_feedback_relevant, is_noise_by_rules
+from app.agents.relevance import is_noise_by_rules
 from app.api.deps import get_current_user
 from app.core.rate_limit import check_rate_limit
 from app.database import get_db
@@ -301,12 +301,15 @@ async def widget_ingest(
     if body_text and len(body_text) < 10:
         raise HTTPException(status_code=422, detail="description must be at least 10 characters if provided")
 
+    # The widget is a purpose-built feedback form — unlike an inbox/channel, nearly
+    # everything submitted through it is intentional feedback, so we only run the
+    # cheap deterministic noise guard here, not the LLM relevance check (which is
+    # tuned for high-noise ambient sources like Gmail/Slack and produces false
+    # negatives on short, legitimate praise/complaints such as "Nice UI look").
     noise_check = {"from": payload.user_handle or "", "label_ids": [], "body": body_text or title}
-    if is_noise_by_rules(noise_check) or not await is_feedback_relevant(
-        subject=title, body=body_text, sender=payload.user_handle or ""
-    ):
+    if is_noise_by_rules(noise_check):
         logger.info(
-            "Widget submission classified as non-feedback — accepted but not queued",
+            "Widget submission classified as noise — accepted but not queued",
             extra={"tenant_id": wk.tenant_id, "key_id": wk.id},
         )
         return {"success": True, "data": {"id": None}}
