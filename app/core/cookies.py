@@ -12,7 +12,10 @@ _REFRESH_PATH = "/v1/auth"
 
 def _cookie_base() -> dict:
     secure = os.environ.get("cookie_secure", "false").lower() in ("true", "1")
-    samesite = os.environ.get("cookie_samesite", "lax")
+    samesite = os.environ.get("cookie_samesite", "lax").lower()  # must be lowercase for browsers
+    # SameSite=None requires Secure=True — enforce automatically
+    if samesite == "none":
+        secure = True
     return {"secure": secure, "samesite": samesite, "domain": None}
 
 
