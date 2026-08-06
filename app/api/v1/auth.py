@@ -217,7 +217,7 @@ async def register(body: RegisterRequest, response: Response, request: Request, 
 
     csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": tenant.id, "csrf_token": csrf_token})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": tenant.id, "csrf_token": csrf_token, "access_token": access_token, "refresh_token": refresh_token})
 
 
 
@@ -249,12 +249,17 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
 
     csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token, "access_token": access_token, "refresh_token": refresh_token})
 
+class RefreshRequest(BaseModel):
+    refresh_token: str | None = None
 
 @router.post("/refresh", response_model=AuthSuccessResponse)
-async def refresh_token(request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+async def refresh_token(request: Request, response: Response, body: RefreshRequest | None = None, db: AsyncSession = Depends(get_db)):
     refresh_tok = request.cookies.get("refresh_token")
+    if not refresh_tok and body and body.refresh_token:
+        refresh_tok = body.refresh_token
+
     if not refresh_tok:
         raise HTTPException(status_code=401, detail="Missing refresh token")
 
@@ -286,7 +291,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
 
     csrf_token = set_auth_cookies(response, access_token, new_refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token, "access_token": access_token, "refresh_token": new_refresh_token})
 
 
 @router.post("/logout")
@@ -643,4 +648,4 @@ async def github_oauth_callback(
 
     csrf_token = set_auth_cookies(response, access_token, refresh_token)
 
-    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token})
+    return AuthSuccessResponse(data={"user_id": user.id, "role": user.role, "tenant_id": user.tenant_id, "csrf_token": csrf_token, "access_token": access_token, "refresh_token": refresh_token})

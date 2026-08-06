@@ -14,14 +14,24 @@ async def get_current_user(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    # Prefer Authorization: Bearer <token> (works cross-origin without cookie restrictions).
+    # Fall back to the HttpOnly access_token cookie for same-origin / proxy setups.
+    token: str | None = None
+    using_bearer = False
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        using_bearer = True
+    else:
+        token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    # Double-submit CSRF check on all state-mutating methods.
-    # GET/HEAD/OPTIONS are safe methods (no side effects) — exempt from CSRF.
-    # WebSocket upgrades are also exempt (no custom headers possible in browsers).
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
+    # Double-submit CSRF check on mutating methods — only for cookie auth.
+    # Bearer token requests are already protected by the token itself.
+    if not using_bearer and request.method not in ("GET", "HEAD", "OPTIONS"):
         csrf_cookie = request.cookies.get(CSRF_TOKEN_COOKIE, "")
         csrf_header = request.headers.get("X-CSRF-Token", "")
         if not csrf_cookie or not hmac.compare_digest(csrf_cookie, csrf_header):
